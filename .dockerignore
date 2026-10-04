@@ -1,0 +1,17 @@
+# Secrets and state never go into the image: secrets come from env_file,
+# state lives in the /data and /cache volumes.
+**/.env
+backend/data
+backend/cache
+cache
+data
+
+# Rebuilt inside the image.
+**/node_modules
+**/.venv
+**/dist
+**/__pycache__
+**/*.pyc
+
+.git
+**/.DS_Store

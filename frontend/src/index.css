@@ -1,0 +1,76 @@
+@import "tailwindcss";
+
+/* Palette: cool safe-deposit greys, teal for actions, brass for locks. */
+:root {
+  --paper: #eceff0;
+  --surface: #fafbfb;
+  --ink: #1c2a2b;
+  --muted: #5a696a;
+  --line: #cdd5d5;
+  --teal: #0e5f5a;
+  --teal-ink: #ffffff;
+  --brass: #8a6118;
+  --danger: #a3342b;
+  --danger-ink: #ffffff;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #111a1b;
+    --surface: #182324;
+    --ink: #e3e9e8;
+    --muted: #94a4a3;
+    --line: #2c3a3b;
+    --teal: #63c4b8;
+    --teal-ink: #0b1f1e;
+    --brass: #d6a85a;
+    --danger: #ef8a7e;
+    --danger-ink: #2a0d0a;
+  }
+}
+
+@theme inline {
+  --font-sans: "Bricolage Grotesque Variable", ui-sans-serif, system-ui, sans-serif;
+  --color-paper: var(--paper);
+  --color-surface: var(--surface);
+  --color-ink: var(--ink);
+  --color-muted: var(--muted);
+  --color-line: var(--line);
+  --color-teal: var(--teal);
+  --color-teal-ink: var(--teal-ink);
+  --color-brass: var(--brass);
+  --color-danger: var(--danger);
+  --color-danger-ink: var(--danger-ink);
+}
+
+@layer base {
+  html {
+    color-scheme: light dark;
+  }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+  }
+  button:not(:disabled),
+  summary {
+    cursor: pointer;
+  }
+  :focus-visible {
+    outline: 2px solid var(--teal);
+    outline-offset: 2px;
+  }
+}
+
+/* The one moving part: a drive's dial turns when it unlocks. */
+.dial-knob {
+  transform-origin: 24px 24px;
+  transition: transform 520ms cubic-bezier(0.3, 1.35, 0.5, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dial-knob {
+    transition: none;
+  }
+}

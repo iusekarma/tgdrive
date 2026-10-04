@@ -1,0 +1,38 @@
+services:
+  tgdrive:
+    build: .
+    image: tgdrive:latest
+    container_name: tgdrive
+    restart: unless-stopped
+    init: true
+
+    # Bot token, chat ID, passphrases and tuning. See backend/.env.example.
+    env_file: backend/.env
+    environment:
+      # Fixed inside the container; these win over the same names in backend/.env.
+      TGDRIVE_DB: /data/tgdrive.db
+      TGDRIVE_CACHE_DIR: /cache
+      TGDRIVE_STATIC_DIR: /app/static
+      # Behind a reverse proxy on this host, let it pass the real client IP
+      # (used to slow down password guessing):
+      # FORWARDED_ALLOW_IPS: "*"
+
+    # Host address and port, set in .env next to this file (not backend/.env).
+    # The default 127.0.0.1 is only reachable from this machine. Put a reverse
+    # proxy with HTTPS in front (and set TGDRIVE_COOKIE_SECURE=true), or set
+    # TGDRIVE_HOST=0.0.0.0 for plain HTTP on a trusted network.
+    ports:
+      - "${TGDRIVE_HOST:-127.0.0.1}:${TGDRIVE_PORT:-8000}:8000"
+
+    volumes:
+      # The database. An empty folder is fine: on first start it is restored
+      # from the snapshot pinned in the Telegram channel.
+      - ./backend/data:/data
+      # Thumbnails. Disposable; capped by TGDRIVE_THUMB_CACHE_MB.
+      - tgdrive-cache:/cache
+
+    # On stop the server uploads a last database snapshot to Telegram.
+    stop_grace_period: 60s
+
+volumes:
+  tgdrive-cache:
