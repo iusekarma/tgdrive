@@ -8,11 +8,11 @@ import os
 import sqlite3
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import AsyncIterator, Callable
 
 from . import crypto, db, thumbs
-from .transport import BlobRef, Transport
+from .transport import BlobRef, Transport, Wait, on_wait
 
 CHUNK_SIZE = 16 * 1024 * 1024  # plaintext bytes per Telegram message
 
@@ -39,6 +39,14 @@ class NoVault(StorageError):
     pass
 
 
+class TransportUnavailable(StorageError):
+    """The transport gave up on a call. What was stored before it is kept."""
+
+
+class Gone(StorageError):
+    """An upload was cancelled or expired while it was being written."""
+
+
 @dataclass
 class Drive:
     """An unlocked drive. Holding this object is what 'logged in' means."""
@@ -62,6 +70,35 @@ class Entry:
     size: int
     created_at: int
     thumb: bool = False
+
+
+@dataclass
+class UploadState:
+    """A resumable upload in progress. Lives in memory: a restart discards
+    every unfinished upload (cleanup_incomplete), so nothing is lost by it.
+
+    phase: 'idle'      nobody is sending
+           'receiving' reading the next chunk from the client
+           'storing'   handing a chunk to the transport
+           'waiting'   the transport is waiting to retry (see `wait`)"""
+    size: int
+    chunks: int            # how many the finished file has
+    stored: int = 0        # bytes safely in the transport; resume from here
+    next_idx: int = 0
+    phase: str = "idle"
+    wait: Wait | None = None
+    wait_until: float = 0.0
+    touched: float = field(default_factory=time.monotonic)
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    gone: bool = False
+
+    def waiting(self, wait: Wait) -> None:
+        self.phase, self.wait = "waiting", wait
+        self.wait_until = time.monotonic() + wait.seconds
+
+    @property
+    def retry_in(self) -> float:
+        return max(0.0, self.wait_until - time.monotonic())
 
 
 def _new_id() -> str:
@@ -124,6 +161,7 @@ class Storage:
         self._kdf_gate = asyncio.Semaphore(2)  # each Argon2id run holds 64 MiB
         self._thumb_gate = asyncio.Semaphore(2)
         self._thumb_locks: dict[str, asyncio.Lock] = {}
+        self._uploads: dict[str, UploadState] = {}
         self._thumb_failed: set[str] = set()
 
     async def _kdf(self, fn, *args):
@@ -281,6 +319,17 @@ class Storage:
         drive.protected = True
         return recovery_key
 
+    def rename_drive(self, drive: Drive, new_name: str) -> None:
+        """Only the label changes: every key is bound to the drive's id."""
+        if new_name == drive.name:
+            return
+        try:
+            with self.conn:
+                self.conn.execute("UPDATE drives SET name = ? WHERE id = ?", (new_name, drive.id))
+        except sqlite3.IntegrityError:
+            raise Conflict(f"drive already exists: {new_name}") from None
+        drive.name = new_name
+
     def detach_drive(self, drive: Drive) -> list[BlobRef]:
         """Removes the drive from the database; returns its blobs to discard."""
         roots = self.conn.execute(
@@ -388,7 +437,14 @@ class Storage:
         if name in self._names_in(drive, parent_id):
             raise Conflict(f"already exists: {name}")
 
-    def mkdir(self, drive: Drive, parent_id: str | None, name: str) -> str:
+    def mkdir(self, drive: Drive, parent_id: str | None, name: str, exist_ok: bool = False) -> str:
+        """With exist_ok, a folder already of that name is returned instead
+        (a file of that name is still a conflict)."""
+        if exist_ok:
+            self._check_name(name)
+            existing = self.find(drive, parent_id, name)
+            if existing is not None and existing.kind == "dir":
+                return existing.id
         self._check_target(drive, parent_id, name)
         node_id = _new_id()
         with self.conn:
@@ -451,22 +507,130 @@ class Storage:
         idx = 0
         try:
             async for data, final in _rechunk(source, self.chunk_size):
-                blob = await asyncio.to_thread(crypto.encrypt_chunk, file_key, node_id, idx, final, data)
-                ref = await self.transport.put(blob)
-                # Recorded immediately, so a crash never leaves a blob we can't find.
-                with self.conn:
-                    self.conn.execute(
-                        "INSERT INTO chunks VALUES (?, ?, ?, ?, ?, ?)",
-                        (node_id, idx, ref.chat_id, ref.message_id, ref.file_id, len(data)),
-                    )
+                await self._store_chunk(file_key, node_id, idx, final, data)
                 total += len(data)
                 idx += 1
         except BaseException:
             await self._purge(node_id)
             raise
-        with self.conn:
-            self.conn.execute("UPDATE nodes SET size = ?, state = 'ready' WHERE id = ?", (total, node_id))
+        self._finish(node_id, total)
         return node_id
+
+    async def _store_chunk(self, file_key: bytes, node_id: str, idx: int, final: bool, data: bytes) -> None:
+        blob = await asyncio.to_thread(crypto.encrypt_chunk, file_key, node_id, idx, final, data)
+        ref = await self.transport.put(blob)
+        # Recorded immediately, so a crash never leaves a blob we can't find.
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO chunks VALUES (?, ?, ?, ?, ?, ?)",
+                (node_id, idx, ref.chat_id, ref.message_id, ref.file_id, len(data)),
+            )
+
+    def _finish(self, node_id: str, size: int) -> None:
+        with self.conn:
+            self.conn.execute("UPDATE nodes SET size = ?, state = 'ready' WHERE id = ?", (size, node_id))
+
+    # --- resumable uploads --------------------------------------------------
+    #
+    # start_upload reserves the name; write_upload takes the file from any
+    # offset up to what is already stored, so a client that lost its
+    # connection (or got a 503 when Telegram gave up) sends the rest again
+    # from upload_state().stored. At most one chunk is ever sent twice.
+
+    def start_upload(self, drive: Drive, parent_id: str | None, name: str, size: int) -> str:
+        if size < 0:
+            raise StorageError("invalid size")
+        self._check_target(drive, parent_id, name)
+        node_id = _new_id()
+        _, wrapped = drive.keys.new_file_key(node_id)
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO nodes (id, drive_id, parent_id, kind, name_enc, wrapped_key, chunk_size, state, created_at) "
+                "VALUES (?, ?, ?, 'file', ?, ?, ?, 'uploading', ?)",
+                (node_id, drive.id, parent_id, drive.keys.encrypt_name(node_id, name),
+                 wrapped, self.chunk_size, int(time.time())),
+            )
+        self._uploads[node_id] = UploadState(size, max(1, -(-size // self.chunk_size)))
+        return node_id
+
+    def upload_state(self, drive: Drive, node_id: str) -> UploadState:
+        state = self._uploads.get(node_id)
+        if state is None or self._node(drive, node_id)["state"] != "uploading":
+            raise NotFound("no such upload")
+        return state
+
+    async def write_upload(self, drive: Drive, node_id: str, offset: int,
+                           source: AsyncIterator[bytes]) -> bool:
+        """`source` is the file from `offset` on. Bytes already stored are
+        skipped, so an offset that is behind is fine. Stops at the end of
+        `source`: a partial chunk at the end is dropped, to be sent again.
+        Returns whether the file is now complete."""
+        state = self.upload_state(drive, node_id)
+        # A dropped connection may still be finishing its chunk: wait for it.
+        async with state.lock:
+            if state.gone:
+                raise Gone("upload was cancelled")
+            if offset < 0 or offset > state.stored:
+                raise Conflict(f"upload has {state.stored} bytes; resume from there")
+            file_key = drive.keys.unwrap_file_key(node_id, self._node(drive, node_id)["wrapped_key"])
+            skip = state.stored - offset
+            buf = bytearray()
+            token = on_wait.set(state.waiting)
+            try:
+                state.phase = "receiving"
+                await self._flush_upload(state, file_key, node_id, buf)
+                async for piece in source:
+                    state.touched = time.monotonic()
+                    if skip:
+                        cut = min(skip, len(piece))
+                        piece, skip = piece[cut:], skip - cut
+                    buf += piece
+                    if state.stored + len(buf) > state.size:
+                        raise StorageError("more data than the upload's size")
+                    await self._flush_upload(state, file_key, node_id, buf)
+            finally:
+                on_wait.reset(token)
+                state.phase, state.wait = "idle", None
+                state.touched = time.monotonic()
+            if state.next_idx < state.chunks:
+                return False
+            self._finish(node_id, state.size)
+            self._uploads.pop(node_id, None)
+            return True
+
+    async def _flush_upload(self, state: UploadState, file_key: bytes, node_id: str, buf: bytearray) -> None:
+        """Stores every whole chunk in buf (and the last one, which may be short or empty)."""
+        while state.next_idx < state.chunks:
+            take = min(self.chunk_size, state.size - state.stored)
+            if len(buf) < take:
+                return
+            data = bytes(buf[:take])
+            state.phase = "storing"
+            try:
+                await self._store_chunk(file_key, node_id, state.next_idx, state.next_idx == state.chunks - 1, data)
+            except sqlite3.IntegrityError:
+                raise Gone("upload was cancelled") from None   # the node was deleted under us
+            except Exception as e:
+                log.warning("storing chunk %d of %s failed", state.next_idx, node_id, exc_info=True)
+                raise TransportUnavailable(f"could not store the file in Telegram: {e}") from e
+            del buf[:take]
+            state.stored += take
+            state.next_idx += 1
+            state.phase, state.wait = "receiving", None
+
+    async def cancel_upload(self, drive: Drive, node_id: str) -> None:
+        state = self.upload_state(drive, node_id)
+        state.gone = True
+        async with state.lock:   # after any write still running has stopped
+            await self._purge(node_id)
+
+    async def expire_uploads(self, idle_seconds: float) -> int:
+        """Discards uploads nobody has sent to for `idle_seconds`."""
+        now = time.monotonic()
+        stale = [n for n, s in self._uploads.items() if not s.lock.locked() and now - s.touched > idle_seconds]
+        for node_id in stale:
+            await self._purge(node_id)
+        return len(stale)
 
     async def download(self, drive: Drive, node_id: str,
                        start: int = 0, end: int | None = None) -> AsyncIterator[bytes]:
@@ -542,6 +706,9 @@ class Storage:
                 self.conn.execute("DELETE FROM nodes WHERE id = ?", (node_id,))
         for node_id in gone:
             self._remove_thumbnail(node_id)
+            state = self._uploads.pop(node_id, None)
+            if state is not None:
+                state.gone = True
         return refs
 
     async def discard(self, refs: list[BlobRef]) -> None:

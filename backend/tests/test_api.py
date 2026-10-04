@@ -140,6 +140,63 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(c.post("/api/drives/open/delete", json={"password": "master-pw"}).status_code, 204)
         self.assertEqual([d["name"] for d in c.get("/api/drives").json()], ["main"])
 
+    def test_rename_drive(self):
+        c = self.c
+        data = os.urandom(3000)
+        node = c.put("/api/drives/main/files", params={"filename": "a.bin"}, content=data).json()
+        c.post("/api/drives", json={"name": "other"})
+
+        self.assertEqual(c.post("/api/drives/main/rename", json={"name": "other"}).status_code, 409)
+        self.assertEqual(c.post("/api/drives/main/rename", json={"name": "bad/name"}).status_code, 422)
+        r = c.post("/api/drives/main/rename", json={"name": "renamed"})
+        self.assertEqual(r.json(), {"name": "renamed"})
+        self.assertEqual([d["name"] for d in c.get("/api/drives").json()], ["other", "renamed"])
+        self.assertEqual(c.get("/api/drives/main/nodes").status_code, 404)
+        # Still unlocked under the new name, and the files still decrypt.
+        self.assertEqual(c.get(f"/api/drives/renamed/files/{node['id']}").content, data)
+
+        # A drive with a password must be unlocked to be renamed; the password still works after.
+        c.post("/api/drives/renamed/lock")
+        self.assertEqual(c.post("/api/drives/renamed/rename", json={"name": "x"}).json()["locked"], "drive")
+        self.assertEqual(c.post("/api/drives/renamed/unlock", json={"password": "password1"}).status_code, 200)
+        self.assertEqual(c.post("/api/drives/other/rename", json={"name": "open one"}).status_code, 200)
+
+    def test_resumable_upload(self):
+        c = self.c
+        data = os.urandom(1024 * 3 + 7)   # chunk_size is 1024 here
+        r = c.post("/api/drives/main/uploads", json={"filename": "big.bin", "size": len(data)})
+        self.assertEqual(r.status_code, 201, r.text)
+        url = f"/api/drives/main/uploads/{r.json()['id']}"
+
+        # The body ends early, as a dropped connection would: whole chunks are kept.
+        r = c.put(url, content=data[:1500])
+        self.assertEqual(r.json(), {"done": False, "size": len(data), "stored": 1024, "phase": "idle", "wait": None})
+        self.assertEqual(c.get(url).json()["stored"], 1024)
+        self.assertEqual(c.put(url, params={"offset": 2048}, content=data[2048:]).status_code, 409)
+
+        r = c.put(url, params={"offset": 1024}, content=data[1024:])
+        self.assertEqual(r.status_code, 201, r.text)
+        entry = r.json()["entry"]
+        self.assertEqual((entry["name"], entry["size"]), ("big.bin", len(data)))
+        self.assertEqual(c.get(url).json(), {"done": True, "entry": entry})
+        self.assertEqual(c.get(f"/api/drives/main/files/{entry['id']}").content, data)
+
+        r = c.post("/api/drives/main/uploads", json={"filename": "big.bin", "size": 1})
+        self.assertEqual(r.status_code, 409)
+        nid = c.post("/api/drives/main/uploads", json={"filename": "other", "size": 5000}).json()["id"]
+        self.assertEqual(c.delete(f"/api/drives/main/uploads/{nid}").status_code, 204)
+        self.assertEqual(c.get(f"/api/drives/main/uploads/{nid}").status_code, 404)
+
+    def test_create_folder_exist_ok(self):
+        c = self.c
+        first = c.post("/api/drives/main/folders", json={"name": "docs"}).json()
+        self.assertEqual(c.post("/api/drives/main/folders", json={"name": "docs"}).status_code, 409)
+        again = c.post("/api/drives/main/folders", json={"name": "docs", "exist_ok": True})
+        self.assertEqual((again.status_code, again.json()["id"]), (201, first["id"]))
+        c.put("/api/drives/main/files", params={"filename": "f"}, content=b"x")
+        r = c.post("/api/drives/main/folders", json={"name": "f", "exist_ok": True})
+        self.assertEqual(r.status_code, 409)
+
     def test_master_password_change_and_recovery(self):
         c = self.c
         r = c.post("/api/vault/password", json={"current_password": "master-pw", "new_password": "master-pw2"})

@@ -48,6 +48,12 @@ class Sessions:
         for s in self._sessions.values():
             s.drives.pop(name, None)
 
+    def rename_drive(self, old: str, new: str) -> None:
+        for s in self._sessions.values():
+            if old in s.drives:
+                drive = s.drives[new] = s.drives.pop(old)
+                drive.name = new
+
     def _sweep(self) -> None:
         now = self._clock()
         for token in [t for t, s in self._sessions.items() if now - s.last_seen > self.idle_seconds]:

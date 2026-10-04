@@ -26,13 +26,16 @@ from .backup import BackupScheduler
 from .config import Config
 from .httprange import RangeNotSatisfiable, parse_range
 from .sessions import LoginThrottle, Session, Sessions
-from .storage import (Conflict, Drive, NoSnapshot, NotFound, NoVault, Storage, StorageError,
-                      restore_database)
+from .storage import (Conflict, Drive, Gone, NoSnapshot, NotFound, NoVault, Storage, StorageError,
+                      TransportUnavailable, UploadState, restore_database)
 from .transport import BlobRef
 
 log = logging.getLogger("tgdrive")
 
 COOKIE = "tgdrive_session"
+
+#: An unfinished upload nobody has sent to for this long is discarded.
+UPLOAD_IDLE_SECONDS = 3600
 
 # Only these are ever rendered by the browser on our origin. Anything else
 # (HTML, SVG, ...) could run script against the session, so it is always
@@ -62,6 +65,10 @@ class DriveCreate(BaseModel):
     password: NewPassword | None = None
 
 
+class DriveRename(BaseModel):
+    name: DriveName
+
+
 class Unlock(BaseModel):
     password: Password
 
@@ -84,14 +91,22 @@ class DrivePassword(BaseModel):
 
 
 class FolderCreate(BaseModel):
+    """With `exist_ok`, a folder already of that name is returned instead of a 409."""
     name: str
     parent_id: str | None = None
+    exist_ok: bool = False
 
 
 class NodeUpdate(BaseModel):
     """Send `name` to rename, `parent_id` to move (null moves to the drive root)."""
     name: str | None = None
     parent_id: str | None = None
+
+
+class UploadStart(BaseModel):
+    filename: str
+    parent_id: str | None = None
+    size: int = Field(ge=0)
 
 
 class NodesMove(BaseModel):
@@ -323,6 +338,16 @@ async def set_drive_password(name: str, body: DrivePassword, request: Request,
     return {"protected": drive.protected, "recovery_key": recovery_key}
 
 
+@router.post("/drives/{name}/rename")
+async def rename_drive(name: str, body: DriveRename, request: Request, drive: Drive = Depends(unlocked_drive),
+                       store: Storage = Depends(get_store)):
+    """Renames the drive. A drive with a password must be unlocked first."""
+    store.rename_drive(drive, body.name)
+    request.app.state.sessions.rename_drive(name, body.name)
+    _changed(request)
+    return {"name": body.name}
+
+
 @router.post("/drives/{name}/delete")
 async def delete_drive(name: str, body: Unlock, request: Request, session: Session = Depends(unlocked_vault),
                        store: Storage = Depends(get_store)):
@@ -365,7 +390,7 @@ async def search(q: Annotated[str, Query(max_length=200)], limit: Annotated[int,
 @router.post("/drives/{name}/folders", status_code=201)
 async def create_folder(body: FolderCreate, request: Request, drive: Drive = Depends(unlocked_drive),
                         store: Storage = Depends(get_store)):
-    node_id = store.mkdir(drive, body.parent_id, body.name)
+    node_id = store.mkdir(drive, body.parent_id, body.name, body.exist_ok)
     _changed(request)
     return asdict(store.stat(drive, node_id))
 
@@ -417,6 +442,66 @@ async def upload_file(request: Request, filename: str, parent: str | None = None
         return Response(status_code=400)  # nobody is listening; the partial upload is already purged
     _changed(request)
     return asdict(store.stat(drive, node_id))
+
+
+def _upload_status(state: UploadState) -> dict:
+    wait = state.wait
+    return {
+        "done": False,
+        "size": state.size,
+        "stored": state.stored,
+        "phase": state.phase,
+        "wait": wait and {
+            "reason": wait.reason,
+            "attempt": wait.attempt,
+            "attempts": wait.attempts,
+            "retry_in": round(state.retry_in, 1),
+        },
+    }
+
+
+@router.post("/drives/{name}/uploads", status_code=201)
+async def start_upload(body: UploadStart, drive: Drive = Depends(unlocked_drive),
+                       store: Storage = Depends(get_store)):
+    """Starts a resumable upload and reserves its name. Send the file with
+    PUT .../uploads/{id}; if that is cut off, ask GET .../uploads/{id} how
+    much is stored and send the rest from there."""
+    node_id = store.start_upload(drive, body.parent_id, body.filename, body.size)
+    return {"id": node_id, "chunk_size": store.chunk_size}
+
+
+@router.get("/drives/{name}/uploads/{node_id}")
+async def upload_status(node_id: str, drive: Drive = Depends(unlocked_drive), store: Storage = Depends(get_store)):
+    """`stored` bytes are safe in Telegram; resume from there. `phase` says
+    what the server is doing, and `wait`, when set, why it is waiting to
+    retry Telegram. A finished upload answers with `done` and its entry."""
+    try:
+        return _upload_status(store.upload_state(drive, node_id))
+    except NotFound:
+        entry = store.stat(drive, node_id)   # 404 if it is gone, not finished
+        return {"done": True, "entry": asdict(entry)}
+
+
+@router.put("/drives/{name}/uploads/{node_id}")
+async def write_upload(node_id: str, request: Request, offset: Annotated[int, Query(ge=0)] = 0,
+                       drive: Drive = Depends(unlocked_drive), store: Storage = Depends(get_store)):
+    """The body is the file from `offset` on. 201 with the entry once the file
+    is complete; 200 with the upload's status if the body ended early. 503
+    means Telegram gave up for now: what was stored so far is kept."""
+    try:
+        done = await store.write_upload(drive, node_id, offset, request.stream())
+    except ClientDisconnect:
+        return Response(status_code=400)   # nobody is listening; resume picks up from what was stored
+    if not done:
+        return _upload_status(store.upload_state(drive, node_id))
+    _changed(request)
+    return JSONResponse({"done": True, "entry": asdict(store.stat(drive, node_id))}, status_code=201)
+
+
+@router.delete("/drives/{name}/uploads/{node_id}", status_code=204)
+async def cancel_upload(node_id: str, drive: Drive = Depends(unlocked_drive), store: Storage = Depends(get_store)):
+    await store.cancel_upload(drive, node_id)
+    return Response(status_code=204)
 
 
 @router.get("/drives/{name}/files/{node_id}")
@@ -572,6 +657,16 @@ async def lifespan(app: FastAPI):
     backup.start()
     store.on_change = backup.mark_dirty
 
+    async def expire_uploads():
+        while True:
+            await asyncio.sleep(UPLOAD_IDLE_SECONDS / 6)
+            try:
+                if await store.expire_uploads(UPLOAD_IDLE_SECONDS):
+                    log.info("discarded abandoned upload(s)")
+            except Exception:
+                log.warning("could not discard abandoned uploads", exc_info=True)
+    expiry = asyncio.create_task(expire_uploads())
+
     app.state.store = store
     app.state.backup = backup
     app.state.sessions = Sessions(idle_seconds=cfg.session_idle)
@@ -580,6 +675,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        expiry.cancel()
         if app.state.discards:
             await asyncio.gather(*app.state.discards, return_exceptions=True)
         await backup.stop()
@@ -603,6 +699,8 @@ def create_app(cfg: Config | None = None) -> FastAPI:
     app.add_exception_handler(NotFound, error(404))
     app.add_exception_handler(Conflict, error(409))
     app.add_exception_handler(NoVault, error(409))
+    app.add_exception_handler(Gone, error(410))
+    app.add_exception_handler(TransportUnavailable, error(503))
     app.add_exception_handler(StorageError, error(400))
     app.add_exception_handler(thumbs.BadImage, error(400))
 

@@ -11,6 +11,7 @@
     python -m app.cli rm DRIVE NAME
     python -m app.cli drive-password DRIVE [--remove]   (add, change or remove a drive's password)
     python -m app.cli reset-password DRIVE              (uses the drive's recovery key)
+    python -m app.cli rename-drive DRIVE NEW_NAME
     python -m app.cli rm-drive DRIVE
     python -m app.cli backup
     python -m app.cli restore [--overwrite]
@@ -143,6 +144,10 @@ async def run(args: argparse.Namespace) -> None:
                     await store.delete(drive, entry.id)
                     await store.backup()
                     print(f"deleted {args.name}")
+            elif args.cmd == "rename-drive":
+                store.rename_drive(drive, args.new_name)
+                await store.backup()
+                print(f"renamed drive '{args.drive}' to '{args.new_name}'")
             elif args.cmd == "rm-drive":
                 await store.delete_drive(drive)
                 await store.backup()
@@ -164,6 +169,7 @@ def main() -> None:
     sub.add_parser("backup")
     sub.add_parser("restore").add_argument("--overwrite", action="store_true")
     sub.add_parser("ls").add_argument("drive")
+    s = sub.add_parser("rename-drive"); s.add_argument("drive"); s.add_argument("new_name")
     sub.add_parser("rm-drive").add_argument("drive")
     s = sub.add_parser("put"); s.add_argument("drive"); s.add_argument("path"); s.add_argument("--as", dest="name")
     s = sub.add_parser("get"); s.add_argument("drive"); s.add_argument("name"); s.add_argument("out")

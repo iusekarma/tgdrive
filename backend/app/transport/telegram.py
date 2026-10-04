@@ -16,7 +16,7 @@ from collections import defaultdict
 
 import httpx
 
-from .base import BlobRef, Transport
+from .base import BlobRef, Transport, Wait, report_wait
 
 SNAPSHOT_CAPTION = "tgdrive-snapshot"
 MAX_ATTEMPTS = 6
@@ -51,6 +51,7 @@ class TelegramTransport(Transport):
             except httpx.TransportError as e:
                 if last:
                     raise TelegramError(f"{method}: {e!r}") from e
+                report_wait(Wait("unreachable", delay, attempt + 1, MAX_ATTEMPTS))
                 await asyncio.sleep(delay)
                 delay *= 2
                 continue
@@ -61,9 +62,12 @@ class TelegramTransport(Transport):
             if body.get("ok"):
                 return body["result"]
             if r.status_code == 429 and not last:
-                await asyncio.sleep(body.get("parameters", {}).get("retry_after", delay) + 0.5)
+                wait = body.get("parameters", {}).get("retry_after", delay) + 0.5
+                report_wait(Wait("rate_limited", wait, attempt + 1, MAX_ATTEMPTS))
+                await asyncio.sleep(wait)
                 continue
             if r.status_code >= 500 and not last:
+                report_wait(Wait("server_error", delay, attempt + 1, MAX_ATTEMPTS))
                 await asyncio.sleep(delay)
                 delay *= 2
                 continue

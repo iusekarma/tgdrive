@@ -8,7 +8,7 @@ preview and search them, all behind one master password. Each drive can also
 have a password of its own.
 
 - End-to-end encrypted: Telegram only ever sees encrypted chunks
-- Web UI with folders, search, image and video thumbnails, previews, and range downloads (video seeking)
+- Web UI with folders (upload whole folders), uploads that resume after a dropped connection, search, image and video thumbnails, previews, and range downloads (video seeking)
 - Several drives, each optionally protected by its own password
 - Recovery keys for every password
 - The database is backed up to the channel automatically, so a lost server is not a lost drive
@@ -112,7 +112,7 @@ docker compose logs -f        # Ctrl+C to stop following the logs
    If you forget the master password and lose this key, every drive is gone.
 4. Create a drive. Give it its own password if you want an extra lock;
    that also shows a recovery key once.
-5. Upload files by dragging them into the window.
+5. Upload files or whole folders by dragging them into the window.
 
 Restarting the server locks everything; you just enter the master password again.
 
@@ -246,6 +246,7 @@ It asks for the master password, or reads it from `TGDRIVE_MASTER_PASSWORD`.
 | `init` | Set the master password (prints its recovery key once) |
 | `drives` | List drives |
 | `create-drive NAME [--no-password]` | Create a drive, with or without its own password |
+| `rename-drive DRIVE NEW_NAME` | Rename a drive (its keys and files are unchanged) |
 | `rm-drive DRIVE` | Delete a drive and all its files |
 | `put DRIVE FILE [--as NAME]` | Upload a file, optionally under another name |
 | `ls DRIVE` | List files |
@@ -328,6 +329,14 @@ that snapshot. The snapshot contains only wrapped keys and encrypted names,
 but drive names, sizes and timestamps are readable unless you set
 `TGDRIVE_BACKUP_PASSPHRASE`.
 
+**Uploads.** The web UI sends one file at a time and shows its speed, what
+is already stored in Telegram, and when the server is waiting out a Telegram
+rate limit or error. If the connection drops, or Telegram gives up for a
+while, the upload resumes from the last stored chunk (16 MB), trying again
+for a few minutes, and waits while your device is offline. An unfinished
+upload is discarded after an hour without progress, or when the server
+restarts.
+
 **Thumbnails.** Your browser makes thumbnails of images and videos right
 after uploading them. Images uploaded other ways get one made on the server
 when first shown (up to 50 MB). Thumbnails are encrypted and cached on the
@@ -360,14 +369,18 @@ Interactive docs are served at **http://localhost:8000/api/docs**.
 | POST | `/api/drives/{name}/unlock` · `/lock` | Unlock a drive that has a password / lock it again |
 | POST | `/api/drives/{name}/recover` | Set a new drive password using the drive's recovery key |
 | POST | `/api/drives/{name}/password` | Add, change or remove the drive's password |
+| POST | `/api/drives/{name}/rename` | Rename the drive (`{"name": ...}`); a drive with a password must be unlocked |
 | POST | `/api/drives/{name}/delete` | Delete the drive and all its files |
 | GET | `/api/drives/{name}/nodes?parent=ID` | List a folder (with breadcrumb path) |
 | GET | `/api/drives/{name}/search?q=X` | Search names across the whole drive |
-| POST | `/api/drives/{name}/folders` | Create a folder |
+| POST | `/api/drives/{name}/folders` | Create a folder (`"exist_ok": true` returns one already there) |
 | PATCH | `/api/drives/{name}/nodes/{id}` | Rename and/or move |
 | DELETE | `/api/drives/{name}/nodes/{id}` | Delete a file or folder |
 | POST | `/api/drives/{name}/nodes/move` · `/nodes/delete` | Move or delete many at once (`{"ids": [...]}`) |
-| PUT | `/api/drives/{name}/files?filename=X&parent=ID` | Upload; the request body is the raw file |
+| PUT | `/api/drives/{name}/files?filename=X&parent=ID` | Upload in one request; the body is the raw file |
+| POST | `/api/drives/{name}/uploads` | Start a resumable upload (`{"filename", "parent_id", "size"}`) |
+| PUT | `/api/drives/{name}/uploads/{id}?offset=N` | Send the file from byte N; 201 when complete, 503 if Telegram gave up (resume later) |
+| GET · DELETE | `/api/drives/{name}/uploads/{id}` | How much is stored and what the server is doing / cancel |
 | GET | `/api/drives/{name}/files/{id}` | Download; supports `Range` and `?inline=true` |
 | GET · PUT | `/api/drives/{name}/files/{id}/thumbnail` | Get or upload a 320px WebP thumbnail |
 

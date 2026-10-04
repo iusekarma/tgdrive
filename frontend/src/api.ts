@@ -13,6 +13,23 @@ export type Listing = { path: Crumb[]; entries: Entry[] };
 /** `path` is the folders above the match, from the top of the drive. */
 export type SearchResult = Entry & { path: Crumb[] };
 export type SearchResults = { total: number; results: SearchResult[] };
+/** The server is waiting to try Telegram again. */
+export type UploadWait = {
+  reason: "rate_limited" | "unreachable" | "server_error";
+  attempt: number;
+  attempts: number;
+  retry_in: number;
+};
+/** `stored` bytes are safe in Telegram; an interrupted upload resumes from there. */
+export type UploadStatus =
+  | {
+      done: false;
+      size: number;
+      stored: number;
+      phase: "idle" | "receiving" | "storing" | "waiting";
+      wait: UploadWait | null;
+    }
+  | { done: true; entry: Entry };
 
 /** status 0 = server unreachable, -1 = cancelled by the user.
  * `locked` says what a 401 wants: the master password or a drive's own. */
@@ -106,6 +123,8 @@ export const api = {
       current_password: currentPassword,
       new_password: newPassword,
     }),
+  renameDrive: (drive: string, name: string) =>
+    request<{ name: string }>("POST", `${drivePath(drive)}/rename`, { name }),
   deleteDrive: (drive: string, password: string) => request<void>("POST", `${drivePath(drive)}/delete`, { password }),
   logout: () => request<void>("POST", "/logout"),
 
@@ -113,14 +132,23 @@ export const api = {
     request<Listing>("GET", `${drivePath(drive)}/nodes${parent ? `?parent=${encodeURIComponent(parent)}` : ""}`),
   search: (drive: string, q: string) =>
     request<SearchResults>("GET", `${drivePath(drive)}/search?${new URLSearchParams({ q }).toString()}`),
-  createFolder: (drive: string, parent: string | null, name: string) =>
-    request<Entry>("POST", `${drivePath(drive)}/folders`, { name, parent_id: parent }),
+  /** With `existOk`, a folder already of that name is returned instead of an error. */
+  createFolder: (drive: string, parent: string | null, name: string, existOk = false) =>
+    request<Entry>("POST", `${drivePath(drive)}/folders`, { name, parent_id: parent, exist_ok: existOk }),
   rename: (drive: string, id: string, name: string) =>
     request<Entry>("PATCH", `${drivePath(drive)}/nodes/${id}`, { name }),
   move: (drive: string, id: string, parent: string | null) =>
     request<Entry>("PATCH", `${drivePath(drive)}/nodes/${id}`, { parent_id: parent }),
   moveMany: (drive: string, ids: string[], parent: string | null) =>
     request<void>("POST", `${drivePath(drive)}/nodes/move`, { ids, parent_id: parent }),
+  startUpload: (drive: string, parent: string | null, filename: string, size: number) =>
+    request<{ id: string; chunk_size: number }>("POST", `${drivePath(drive)}/uploads`, {
+      filename,
+      parent_id: parent,
+      size,
+    }),
+  uploadStatus: (drive: string, id: string) => request<UploadStatus>("GET", `${drivePath(drive)}/uploads/${id}`),
+  cancelUpload: (drive: string, id: string) => request<void>("DELETE", `${drivePath(drive)}/uploads/${id}`),
   removeMany: (drive: string, ids: string[]) => request<void>("POST", `${drivePath(drive)}/nodes/delete`, { ids }),
 
   fileUrl: (drive: string, id: string, inline = false) =>
@@ -132,35 +160,33 @@ export const api = {
   },
 };
 
-/** fetch() cannot report upload progress, so uploads use XMLHttpRequest. */
-export function uploadFile(
+/** Sends `body`, the file from `offset` on, to an upload made with api.startUpload.
+ * fetch() cannot report upload progress, so this uses XMLHttpRequest. */
+export function sendUpload(
   drive: string,
-  parent: string | null,
-  file: File,
-  onProgress: (loaded: number, total: number) => void,
-): { promise: Promise<Entry>; abort: () => void } {
+  id: string,
+  offset: number,
+  body: Blob,
+  onProgress: (loaded: number) => void,
+): { promise: Promise<UploadStatus>; abort: () => void } {
   const xhr = new XMLHttpRequest();
-  const query = new URLSearchParams({ filename: file.name });
-  if (parent) query.set("parent", parent);
-  xhr.open("PUT", `/api${drivePath(drive)}/files?${query.toString()}`);
+  xhr.open("PUT", `/api${drivePath(drive)}/uploads/${id}?offset=${offset}`);
   xhr.setRequestHeader("Content-Type", "application/octet-stream");
-  xhr.upload.onprogress = (e) => {
-    if (e.lengthComputable) onProgress(e.loaded, e.total);
-  };
-  const promise = new Promise<Entry>((resolve, reject) => {
+  xhr.upload.onprogress = (e) => onProgress(e.loaded);
+  const promise = new Promise<UploadStatus>((resolve, reject) => {
     xhr.onload = () => {
-      let body: unknown = null;
+      let data: unknown = null;
       try {
-        body = JSON.parse(xhr.responseText);
+        data = JSON.parse(xhr.responseText);
       } catch {
         /* non-JSON error body */
       }
-      if (xhr.status >= 200 && xhr.status < 300) resolve(body as Entry);
-      else reject(new ApiError(xhr.status, detailOf(body, `Upload failed (${xhr.status}).`)));
+      if (xhr.status >= 200 && xhr.status < 300) resolve(data as UploadStatus);
+      else reject(new ApiError(xhr.status, detailOf(data, `Upload failed (${xhr.status}).`), lockedOf(data)));
     };
-    xhr.onerror = () => reject(new ApiError(0, "Upload failed: the connection was lost."));
+    xhr.onerror = () => reject(new ApiError(0, "The connection was lost."));
     xhr.onabort = () => reject(new ApiError(-1, "Upload cancelled."));
   });
-  xhr.send(file);
+  xhr.send(body);
   return { promise, abort: () => xhr.abort() };
 }

@@ -1,4 +1,4 @@
-import { MoreHorizontal, X } from "lucide-react";
+import { LayoutGrid, List, MoreHorizontal, X } from "lucide-react";
 import {
   useEffect,
   useId,
@@ -172,16 +172,67 @@ export function MenuItem({
   );
 }
 
-export function PageHeader({ children }: { children?: ReactNode }) {
+/** `wide` spans the whole window, for pages with a sidebar. */
+export function PageHeader({ wide = false, children }: { wide?: boolean; children?: ReactNode }) {
   return (
     <header className="border-b border-line">
-      <div className="mx-auto flex max-w-4xl items-center justify-between gap-4 px-5 py-3">
+      <div className={`mx-auto flex items-center justify-between gap-4 px-5 py-3 ${wide ? "" : "max-w-4xl"}`}>
         <Link to="/" className="text-lg font-semibold tracking-tight">
           tgdrive
         </Link>
         <div className="flex items-center gap-2">{children}</div>
       </div>
     </header>
+  );
+}
+
+export type View = "list" | "grid";
+
+/** A list-or-grid choice, remembered in this browser under `key`. */
+export function useSavedView(key: string): [View, (view: View) => void] {
+  const [view, setView] = useState<View>(() => {
+    try {
+      return localStorage.getItem(key) === "grid" ? "grid" : "list";
+    } catch {
+      return "list";
+    }
+  });
+  function change(next: View) {
+    setView(next);
+    try {
+      localStorage.setItem(key, next);
+    } catch {
+      /* private mode: the choice just isn't remembered */
+    }
+  }
+  return [view, change];
+}
+
+export function ViewToggle({
+  view,
+  onChange,
+  className = "",
+}: {
+  view: View;
+  onChange: (view: View) => void;
+  className?: string;
+}) {
+  return (
+    <div role="group" aria-label="View" className={`flex rounded-md border border-line bg-surface p-0.5 ${className}`}>
+      {(["list", "grid"] as const).map((v) => (
+        <button
+          key={v}
+          type="button"
+          aria-pressed={view === v}
+          aria-label={v === "list" ? "List view" : "Grid view"}
+          title={v === "list" ? "List view" : "Grid view"}
+          onClick={() => onChange(v)}
+          className={`rounded p-1.5 ${view === v ? "bg-teal text-teal-ink" : "text-muted hover:text-ink"}`}
+        >
+          {v === "list" ? <List size={16} /> : <LayoutGrid size={16} />}
+        </button>
+      ))}
+    </div>
   );
 }
 

@@ -1,3 +1,3 @@
-from .base import BlobRef, Transport
+from .base import BlobRef, Transport, Wait, on_wait
 
-__all__ = ["BlobRef", "Transport"]
+__all__ = ["BlobRef", "Transport", "Wait", "on_wait"]

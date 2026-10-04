@@ -2,12 +2,15 @@ import asyncio
 import os
 import tempfile
 import unittest
+from types import SimpleNamespace
 
 from app import crypto, db
 from app.backup import BackupScheduler
 from app.httprange import RangeNotSatisfiable, parse_range
 from app.sessions import LoginThrottle, Sessions
-from app.storage import Conflict, NoSnapshot, NotFound, Storage, StorageError, restore_database
+from app.storage import (Conflict, Gone, NoSnapshot, NotFound, Storage, StorageError, TransportUnavailable,
+                         restore_database)
+from app.transport.base import Wait, report_wait
 from app.transport.local import LocalTransport
 
 crypto.KDF_PARAMS = {"alg": "argon2id", "t": 1, "m_kib": 64, "p": 1}  # fast, tests only
@@ -25,6 +28,23 @@ class CountingTransport(LocalTransport):
     async def get(self, ref):
         self.gets += 1
         return await super().get(ref)
+
+
+class FlakyTransport(CountingTransport):
+    """Reports a retry before every put, and fails the puts listed in `fail_on` (by count, from 1)."""
+    puts = 0
+    fail_on: set[int] = set()
+    seen: list = []
+    state = None   # the upload to watch
+
+    async def put(self, data):
+        self.puts += 1
+        report_wait(Wait("rate_limited", 5, 1, 6))
+        if self.state is not None:
+            self.seen.append((self.state.phase, self.state.wait))
+        if self.puts in self.fail_on:
+            raise RuntimeError("telegram is down")
+        return await super().put(data)
 
 
 class StorageApiSurfaceTest(unittest.IsolatedAsyncioTestCase):
@@ -149,6 +169,89 @@ class StorageApiSurfaceTest(unittest.IsolatedAsyncioTestCase):
             await restore_database(self.transport, os.path.join(self.tmp.name, "new.db"))
 
 
+class ResumableUploadTest(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.transport = FlakyTransport(os.path.join(self.tmp.name, "blobs"))
+        self.transport.seen, self.transport.fail_on = [], set()
+        self.store = Storage(db.connect(os.path.join(self.tmp.name, "a.db")), self.transport, chunk_size=CHUNK)
+        vault, _ = await self.store.setup_vault("master-pw")
+        self.drive, _ = await self.store.create_drive(vault, "main", None)
+
+    def tearDown(self):
+        self.store.conn.close()
+        self.tmp.cleanup()
+
+    async def read(self, nid) -> bytes:
+        return b"".join([c async for c in self.store.download(self.drive, nid)])
+
+    async def test_resume_after_a_cut(self):
+        data = os.urandom(CHUNK * 3 + 100)
+        nid = self.store.start_upload(self.drive, None, "f.bin", len(data))
+        with self.assertRaises(Conflict):
+            self.store.mkdir(self.drive, None, "f.bin")   # the name is taken while uploading
+        # The connection drops partway through the third chunk: two are kept.
+        self.assertFalse(await self.store.write_upload(self.drive, nid, 0, gen(data[:CHUNK * 2 + 500])))
+        state = self.store.upload_state(self.drive, nid)
+        self.assertEqual((state.stored, state.phase), (CHUNK * 2, "idle"))
+        with self.assertRaises(Conflict):
+            await self.store.write_upload(self.drive, nid, CHUNK * 3, gen(data[CHUNK * 3:]))
+        # Resuming from behind what is stored skips what it already has.
+        self.assertTrue(await self.store.write_upload(self.drive, nid, CHUNK, gen(data[CHUNK:])))
+        self.assertEqual(self.transport.puts, 4)
+        self.assertEqual(await self.read(nid), data)
+        self.assertEqual(self.store.stat(self.drive, nid).size, len(data))
+        with self.assertRaises(NotFound):
+            self.store.upload_state(self.drive, nid)
+
+    async def test_empty_and_oversized(self):
+        nid = self.store.start_upload(self.drive, None, "empty", 0)
+        self.assertTrue(await self.store.write_upload(self.drive, nid, 0, gen(b"")))
+        self.assertEqual(await self.read(nid), b"")
+        nid = self.store.start_upload(self.drive, None, "small", 10)
+        with self.assertRaises(StorageError):
+            await self.store.write_upload(self.drive, nid, 0, gen(b"x" * 11))
+
+    async def test_reports_retries_and_keeps_what_was_stored(self):
+        data = os.urandom(CHUNK * 2)
+        nid = self.store.start_upload(self.drive, None, "f.bin", len(data))
+        self.transport.state = self.store.upload_state(self.drive, nid)
+        self.transport.fail_on = {2}
+        with self.assertRaises(TransportUnavailable):
+            await self.store.write_upload(self.drive, nid, 0, gen(data))
+        phase, wait = self.transport.seen[0]
+        self.assertEqual((phase, wait.reason, wait.seconds), ("waiting", "rate_limited", 5))
+        state = self.store.upload_state(self.drive, nid)
+        self.assertEqual((state.stored, state.phase, state.wait), (CHUNK, "idle", None))
+        self.assertTrue(await self.store.write_upload(self.drive, nid, CHUNK, gen(data[CHUNK:])))
+        self.assertEqual(await self.read(nid), data)
+
+    async def test_cancel_and_expire(self):
+        nid = self.store.start_upload(self.drive, None, "a", CHUNK * 2)
+        await self.store.write_upload(self.drive, nid, 0, gen(os.urandom(CHUNK)))
+        await self.store.cancel_upload(self.drive, nid)
+        with self.assertRaises(NotFound):
+            self.store.upload_state(self.drive, nid)
+        self.assertEqual(os.listdir(self.transport.root), [])
+        self.assertIsNone(self.store.find(self.drive, None, "a"))
+
+        nid = self.store.start_upload(self.drive, None, "b", 5)
+        self.assertEqual(await self.store.expire_uploads(3600), 0)
+        self.assertEqual(await self.store.expire_uploads(0), 1)
+        with self.assertRaises(NotFound):
+            self.store.upload_state(self.drive, nid)
+
+    async def test_write_waiting_on_a_cancelled_upload_stops(self):
+        nid = self.store.start_upload(self.drive, None, "a", CHUNK * 2)
+        state = self.store.upload_state(self.drive, nid)
+        async with state.lock:
+            writer = asyncio.create_task(self.store.write_upload(self.drive, nid, 0, gen(os.urandom(CHUNK * 2))))
+            await asyncio.sleep(0)
+            state.gone = True
+        with self.assertRaises(Gone):
+            await writer
+
+
 class SessionsTest(unittest.TestCase):
     def test_idle_expiry_and_touch(self):
         now = [0.0]
@@ -175,6 +278,14 @@ class SessionsTest(unittest.TestCase):
         s.drop(t1)
         self.assertIsNone(s.get(t1))
         self.assertIsNotNone(s.get(t2))
+
+    def test_rename_drive_in_every_session(self):
+        s = Sessions()
+        _, a = s.create()
+        _, b = s.create()
+        a.drives["x"] = SimpleNamespace(name="x")
+        s.rename_drive("x", "y")
+        self.assertEqual((list(a.drives), b.drives, a.drives["y"].name), (["y"], {}, "y"))
 
     def test_throttle(self):
         now = [0.0]

@@ -211,6 +211,56 @@ export function CreateDriveDialog({
   );
 }
 
+export function RenameDriveDialog({
+  drive,
+  onClose,
+  onRenamed,
+}: {
+  drive: string;
+  onClose: () => void;
+  onRenamed: (name: string) => void;
+}) {
+  const [name, setName] = useState(drive);
+  const { busy, error, setError, run } = useSubmit();
+
+  function submit(e: FormEvent) {
+    e.preventDefault();
+    const trimmed = name.trim();
+    if (!DRIVE_NAME.test(trimmed) || trimmed.length > 64) {
+      return setError("Drive names start with a letter or number and use only letters, numbers, spaces, . _ and -");
+    }
+    if (trimmed === drive) return onClose();
+    void run(async () => {
+      const renamed = await api.renameDrive(drive, trimmed);
+      onRenamed(renamed.name);
+    });
+  }
+
+  return (
+    <Dialog title={`Rename ${drive}`} onClose={onClose}>
+      <form onSubmit={submit} className="space-y-4">
+        <Field
+          label="New name"
+          autoFocus
+          required
+          maxLength={64}
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          onFocus={(e) => e.target.select()}
+          hint="Only the name changes. Passwords, recovery keys and files stay as they are."
+        />
+        <ErrorNote>{error}</ErrorNote>
+        <DialogActions>
+          <Button onClick={onClose}>Cancel</Button>
+          <Button variant="primary" type="submit" disabled={busy}>
+            {busy ? "Renaming…" : "Rename"}
+          </Button>
+        </DialogActions>
+      </form>
+    </Dialog>
+  );
+}
+
 /** Shows a recovery key exactly once. The only way out is to confirm it has been saved. */
 export function RecoveryKeyDialog({
   title,
@@ -248,7 +298,12 @@ export function RecoveryKeyDialog({
         {copied ? "Copied" : "Copy key"}
       </Button>
       <label className="mt-5 flex items-start gap-2.5 text-sm">
-        <input type="checkbox" className="mt-0.5 h-4 w-4" checked={saved} onChange={(e) => setSaved(e.target.checked)} />
+        <input
+          type="checkbox"
+          className="mt-0.5 h-4 w-4"
+          checked={saved}
+          onChange={(e) => setSaved(e.target.checked)}
+        />
         I have saved this key somewhere safe.
       </label>
       <DialogActions>

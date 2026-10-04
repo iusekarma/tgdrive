@@ -1,5 +1,6 @@
 import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  ArrowLeft,
   ChevronRight,
   Download,
   File as FileIcon,
@@ -8,10 +9,9 @@ import {
   Folder,
   FolderInput,
   FolderPlus,
+  FolderUp,
   Image as ImageIcon,
   KeyRound,
-  LayoutGrid,
-  List,
   Lock,
   LockOpen,
   Music,
@@ -25,16 +25,18 @@ import {
 import { useEffect, useRef, useState, type DragEvent, type MouseEvent, type ReactNode } from "react";
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
 
-import { api, ApiError, type Crumb, type Entry } from "../api";
+import { api, ApiError, type Crumb, type DriveInfo, type Entry } from "../api";
 import {
   DeleteDriveDialog,
   DrivePasswordDialog,
   RecoveryKeyDialog,
+  RenameDriveDialog,
   type PasswordAction,
 } from "../components/driveDialogs";
 import { DeleteNodeDialog, MoveDialog, NameDialog, PreviewDialog } from "../components/fileDialogs";
-import { Button, ErrorNote, ICON_BUTTON, Menu, MenuItem, PageHeader } from "../components/ui";
-import { useUploads } from "../components/uploads";
+import Sidebar from "../components/Sidebar";
+import { Button, ErrorNote, ICON_BUTTON, Menu, MenuItem, PageHeader, useSavedView, ViewToggle } from "../components/ui";
+import { pickedFromInput, readDropped, useUploads, type Picked } from "../components/uploads";
 import { driveUrl, formatDate, formatSize, previewKind } from "../format";
 import { cachedThumbnail, forgetThumbnails, hasThumbnail, loadThumbnail } from "../thumbs";
 
@@ -46,27 +48,9 @@ type Open =
   | { type: "preview"; entry: Entry }
   | { type: "password"; action: PasswordAction }
   | { type: "recoveryKey"; recoveryKey: string }
+  | { type: "renameDrive" }
   | { type: "deleteDrive" }
   | null;
-
-type View = "list" | "grid";
-const VIEW_KEY = "tgdrive.view";
-
-function savedView(): View {
-  try {
-    return localStorage.getItem(VIEW_KEY) === "grid" ? "grid" : "list";
-  } catch {
-    return "list";
-  }
-}
-
-function saveView(view: View) {
-  try {
-    localStorage.setItem(VIEW_KEY, view);
-  } catch {
-    /* private mode: the choice just isn't remembered */
-  }
-}
 
 function EntryIcon({ entry, size = 20 }: { entry: Entry; size?: number }) {
   if (entry.kind === "dir") return <Folder size={size} className="shrink-0 text-brass" aria-hidden="true" />;
@@ -79,9 +63,7 @@ function EntryIcon({ entry, size = 20 }: { entry: Entry; size?: number }) {
 /** Fetched when scrolled into view, a few at a time; an icon until then or if there is none. */
 function Thumb({ drive, entry, large = false }: { drive: string; entry: Entry; large?: boolean }) {
   const wanted = hasThumbnail(entry);
-  const [url, setUrl] = useState<string | null | undefined>(() =>
-    wanted ? cachedThumbnail(drive, entry.id) : null,
-  );
+  const [url, setUrl] = useState<string | null | undefined>(() => (wanted ? cachedThumbnail(drive, entry.id) : null));
   const ref = useRef<HTMLSpanElement>(null);
 
   useEffect(() => {
@@ -170,24 +152,6 @@ function where(drive: string, path: Crumb[]): string {
   return [drive, ...path.map((c) => c.name)].join(" › ");
 }
 
-/** Dropped folders are skipped: the browser hands them over as unreadable zero-byte files. */
-function droppedFiles(data: DataTransfer): { files: File[]; folders: number } {
-  const files: File[] = [];
-  let folders = 0;
-  const items = data.items ? Array.from(data.items) : [];
-  if (items.length === 0) return { files: Array.from(data.files), folders };
-  for (const item of items) {
-    if (item.kind !== "file") continue;
-    if (item.webkitGetAsEntry?.()?.isDirectory) {
-      folders += 1;
-      continue;
-    }
-    const file = item.getAsFile();
-    if (file) files.push(file);
-  }
-  return { files, folders };
-}
-
 /** Shortcuts stay off while typing, but not while a selection checkbox has focus. */
 const typingIn = (target: EventTarget | null) => {
   if (target instanceof HTMLInputElement) return !["checkbox", "radio", "button", "submit"].includes(target.type);
@@ -205,11 +169,12 @@ export default function BrowserPage() {
   const [open, setOpen] = useState<Open>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
-  const [view, setView] = useState<View>(savedView);
+  const [view, changeView] = useSavedView("tgdrive.view");
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const anchor = useRef<number | null>(null);
   const dragDepth = useRef(0);
   const fileInput = useRef<HTMLInputElement>(null);
+  const folderInput = useRef<HTMLInputElement>(null);
   const searchInput = useRef<HTMLInputElement>(null);
 
   // The search lives in the URL, so Back returns to the results after opening one.
@@ -246,6 +211,16 @@ export default function BrowserPage() {
       navigate("/", { replace: true, state: { unlock: drive, from: location.pathname } });
     }
   }, [driveLocked, settled, drive, location.pathname, navigate]);
+
+  // Navigation is a transition: dropping the old name's cache any sooner would refetch it under that name.
+  const renamedFrom = useRef<string | null>(null);
+  useEffect(() => {
+    const old = renamedFrom.current;
+    if (old === null || old === drive) return;
+    renamedFrom.current = null;
+    queryClient.removeQueries({ queryKey: ["nodes", old] });
+    forgetThumbnails(old);
+  }, [drive, queryClient]);
 
   useEffect(() => {
     setNotice(null);
@@ -313,17 +288,23 @@ export default function BrowserPage() {
     return () => document.removeEventListener("keydown", onKey);
   });
 
-  function addFiles(files: File[]) {
-    if (files.length > 0) uploads.enqueue(drive, parent, files);
+  function addFiles(files: Picked[], emptyFolders: string[][] = []) {
+    if (files.length > 0 || emptyFolders.length > 0) uploads.enqueue(drive, parent, files, emptyFolders);
   }
 
   function onDrop(e: DragEvent) {
     e.preventDefault();
     dragDepth.current = 0;
     setDragging(false);
-    const { files, folders } = droppedFiles(e.dataTransfer);
-    setNotice(folders > 0 ? "Folders can't be uploaded yet. Drop the files inside them instead." : null);
-    addFiles(files);
+    setNotice(null);
+    // Folders are read in after the drop, so `parent` is captured now.
+    const target = { drive, parent };
+    readDropped(e.dataTransfer).then(
+      ({ files, folders }) => {
+        if (files.length > 0 || folders.length > 0) uploads.enqueue(target.drive, target.parent, files, folders);
+      },
+      () => setNotice("Some of what was dropped couldn't be read. Try choosing it with Upload instead."),
+    );
   }
 
   const hasFiles = (e: DragEvent) => Array.from(e.dataTransfer.types).includes("Files");
@@ -338,11 +319,6 @@ export default function BrowserPage() {
   async function lockDrive() {
     await api.lock(drive).catch(() => undefined);
     leaveDrive();
-  }
-
-  function changeView(next: View) {
-    setView(next);
-    saveView(next);
   }
 
   function itemMenu(entry: Entry) {
@@ -431,7 +407,7 @@ export default function BrowserPage() {
       }}
       onDrop={onDrop}
     >
-      <PageHeader>
+      <PageHeader wide>
         {info?.protected && (
           <Button onClick={() => void lockDrive()}>
             <Lock size={16} />
@@ -463,6 +439,10 @@ export default function BrowserPage() {
                     Add a password
                   </MenuItem>
                 )}
+                <MenuItem onSelect={pick({ type: "renameDrive" })}>
+                  <Pencil size={16} />
+                  Rename drive
+                </MenuItem>
                 <MenuItem danger onSelect={pick({ type: "deleteDrive" })}>
                   <Trash2 size={16} />
                   Delete drive
@@ -473,297 +453,317 @@ export default function BrowserPage() {
         </Menu>
       </PageHeader>
 
-      <main className="mx-auto max-w-4xl px-5 pb-32 pt-8">
-        <nav aria-label="Folder path" className="flex flex-wrap items-center gap-x-1 gap-y-1">
-          <Link
-            to={driveUrl(drive)}
-            className={`rounded px-1 text-3xl font-semibold tracking-tight hover:bg-ink/5 ${crumbs.length ? "text-muted" : ""}`}
-          >
-            {drive}
-          </Link>
-          {crumbs.map((c, i) => (
-            <span key={c.id} className="flex min-w-0 items-center gap-1">
-              <ChevronRight size={20} className="shrink-0 text-muted" aria-hidden="true" />
-              <Link
-                to={driveUrl(drive, c.id)}
-                aria-current={i === crumbs.length - 1 ? "page" : undefined}
-                className={`truncate rounded px-1 text-3xl font-semibold tracking-tight hover:bg-ink/5 ${i === crumbs.length - 1 ? "" : "text-muted"}`}
-              >
-                {c.name}
-              </Link>
-            </span>
-          ))}
-        </nav>
+      <div className="flex">
+        <aside className="sticky top-0 hidden h-screen w-64 shrink-0 self-start overflow-y-auto border-r border-line lg:block">
+          <Sidebar drive={drive} folder={parent} path={crumbs} />
+        </aside>
 
-        <div className="mt-6 flex flex-wrap items-center gap-2">
-          <Button variant="primary" onClick={() => fileInput.current?.click()}>
-            <Upload size={16} />
-            Upload files
-          </Button>
-          <Button onClick={() => setOpen({ type: "newFolder" })}>
-            <FolderPlus size={16} />
-            New folder
-          </Button>
-          <input
-            ref={fileInput}
-            type="file"
-            multiple
-            hidden
-            onChange={(e) => {
-              addFiles(Array.from(e.target.files ?? []));
-              e.target.value = "";
-            }}
-          />
-          <label className="relative order-last w-full sm:order-none sm:ml-auto sm:w-64">
-            <span className="sr-only">Search {drive}</span>
-            <Search
-              size={16}
-              className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted"
-              aria-hidden="true"
+        <main className="mx-auto min-w-0 max-w-4xl flex-1 px-5 pb-32 pt-6">
+          <Link
+            to="/"
+            className="-ml-1 inline-flex items-center gap-1.5 rounded px-1 py-0.5 text-sm text-muted hover:bg-ink/5 hover:text-ink"
+          >
+            <ArrowLeft size={16} aria-hidden="true" />
+            All drives
+          </Link>
+          <nav aria-label="Folder path" className="mt-2 flex flex-wrap items-center gap-x-1 gap-y-1">
+            <Link
+              to={driveUrl(drive)}
+              className={`rounded px-1 text-3xl font-semibold tracking-tight hover:bg-ink/5 ${crumbs.length ? "text-muted" : ""}`}
+            >
+              {drive}
+            </Link>
+            {crumbs.map((c, i) => (
+              <span key={c.id} className="flex min-w-0 items-center gap-1">
+                <ChevronRight size={20} className="shrink-0 text-muted" aria-hidden="true" />
+                <Link
+                  to={driveUrl(drive, c.id)}
+                  aria-current={i === crumbs.length - 1 ? "page" : undefined}
+                  className={`truncate rounded px-1 text-3xl font-semibold tracking-tight hover:bg-ink/5 ${i === crumbs.length - 1 ? "" : "text-muted"}`}
+                >
+                  {c.name}
+                </Link>
+              </span>
+            ))}
+          </nav>
+
+          <div className="mt-6 flex flex-wrap items-center gap-2">
+            <Button variant="primary" onClick={() => fileInput.current?.click()}>
+              <Upload size={16} />
+              Upload files
+            </Button>
+            <Button onClick={() => folderInput.current?.click()}>
+              <FolderUp size={16} />
+              Upload folder
+            </Button>
+            <Button onClick={() => setOpen({ type: "newFolder" })}>
+              <FolderPlus size={16} />
+              New folder
+            </Button>
+            <input
+              ref={fileInput}
+              type="file"
+              multiple
+              hidden
+              onChange={(e) => {
+                addFiles(pickedFromInput(e.target.files));
+                e.target.value = "";
+              }}
             />
             <input
-              ref={searchInput}
-              type="search"
-              placeholder={`Search ${drive}`}
-              value={typed}
-              onChange={(e) => setTyped(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Escape") {
-                  setTyped("");
-                  setParams({}, { replace: true });
-                  e.currentTarget.blur();
-                }
+              ref={(el) => {
+                folderInput.current = el;
+                // Not in React's types. The browser then hands over every file inside, each with its path.
+                el?.setAttribute("webkitdirectory", "");
               }}
-              className="w-full rounded-md border border-line bg-surface py-2 pl-9 pr-3 text-sm text-ink placeholder:text-muted focus:border-teal"
+              type="file"
+              hidden
+              onChange={(e) => {
+                addFiles(pickedFromInput(e.target.files));
+                e.target.value = "";
+              }}
             />
-          </label>
-          <div role="group" aria-label="View" className="ml-auto flex rounded-md border border-line bg-surface p-0.5 sm:ml-0">
-            {(["list", "grid"] as const).map((v) => (
-              <button
-                key={v}
-                type="button"
-                aria-pressed={view === v}
-                aria-label={v === "list" ? "List view" : "Grid view"}
-                title={v === "list" ? "List view" : "Grid view"}
-                onClick={() => changeView(v)}
-                className={`rounded p-1.5 ${view === v ? "bg-teal text-teal-ink" : "text-muted hover:text-ink"}`}
-              >
-                {v === "list" ? <List size={16} /> : <LayoutGrid size={16} />}
-              </button>
-            ))}
+            <label className="relative order-last w-full sm:order-none sm:ml-auto sm:w-64">
+              <span className="sr-only">Search {drive}</span>
+              <Search
+                size={16}
+                className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted"
+                aria-hidden="true"
+              />
+              <input
+                ref={searchInput}
+                type="search"
+                placeholder={`Search ${drive}`}
+                value={typed}
+                onChange={(e) => setTyped(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Escape") {
+                    setTyped("");
+                    setParams({}, { replace: true });
+                    e.currentTarget.blur();
+                  }
+                }}
+                className="w-full rounded-md border border-line bg-surface py-2 pl-9 pr-3 text-sm text-ink placeholder:text-muted focus:border-teal"
+              />
+            </label>
+            <ViewToggle view={view} onChange={changeView} className="ml-auto sm:ml-0" />
           </div>
-        </div>
 
-        {notice && (
-          <p className="mt-4 rounded-md border border-brass/50 bg-brass/10 px-3 py-2 text-sm" role="status">
-            {notice}
-          </p>
-        )}
-
-        {selecting && (
-          <div
-            role="toolbar"
-            aria-label="Selection"
-            className="sticky top-2 z-10 mt-4 flex flex-wrap items-center gap-2 rounded-lg border border-teal/40 bg-surface px-3 py-2 shadow-md"
-          >
-            <span className="mr-auto text-sm font-medium" aria-live="polite">
-              {chosen.length} selected
-            </span>
-            {chosen.length === 1 && chosen[0].kind === "file" && (
-              <a
-                href={api.fileUrl(drive, chosen[0].id)}
-                download={chosen[0].name}
-                className="inline-flex items-center gap-2 rounded-md border border-line bg-surface px-3 py-1.5 text-sm font-medium hover:bg-ink/5"
-              >
-                <Download size={16} />
-                Download
-              </a>
-            )}
-            {chosen.length === 1 && (
-              <Button className="py-1.5" onClick={() => setOpen({ type: "rename", entry: chosen[0] })}>
-                <Pencil size={16} />
-                Rename
-              </Button>
-            )}
-            <Button className="py-1.5" onClick={() => setOpen({ type: "move", entries: chosen })}>
-              <FolderInput size={16} />
-              Move
-            </Button>
-            <Button variant="danger" className="py-1.5" onClick={() => setOpen({ type: "delete", entries: chosen })}>
-              <Trash2 size={16} />
-              Delete
-            </Button>
-            <button type="button" onClick={clearSelection} aria-label="Clear selection" className={ICON_BUTTON}>
-              <X size={18} />
-            </button>
-          </div>
-        )}
-
-        <div
-          className={`mt-4 rounded-lg border ${dragging ? "border-dashed border-teal bg-teal/5" : "border-transparent"}`}
-        >
-          {searching && (
-            <p className="pb-3 text-sm text-muted" aria-live="polite">
-              {search.isPending
-                ? "Searching…"
-                : search.error
-                  ? ""
-                  : search.data && search.data.total > search.data.results.length
-                    ? `Showing the best ${search.data.results.length} of ${search.data.total} matches in ${drive}.`
-                    : `${search.data?.total ?? 0} ${search.data?.total === 1 ? "match" : "matches"} in ${drive}.`}
+          {notice && (
+            <p className="mt-4 rounded-md border border-brass/50 bg-brass/10 px-3 py-2 text-sm" role="status">
+              {notice}
             </p>
           )}
-          {searching && search.error && <ErrorNote>{search.error.message}</ErrorNote>}
 
-          {!searching && listing.isPending && <p className="py-10 text-muted">Loading…</p>}
-
-          {!searching && listing.error && !driveLocked && status !== 401 && (
-            <div className="space-y-3 py-6">
-              <ErrorNote>{status === 404 ? "This folder no longer exists." : listing.error.message}</ErrorNote>
-              {status === 404 && (
-                <Link to={driveUrl(drive)} className="text-sm text-teal underline underline-offset-2">
-                  Go to the top of {drive}
-                </Link>
+          {selecting && (
+            <div
+              role="toolbar"
+              aria-label="Selection"
+              className="sticky top-2 z-10 mt-4 flex flex-wrap items-center gap-2 rounded-lg border border-teal/40 bg-surface px-3 py-2 shadow-md"
+            >
+              <span className="mr-auto text-sm font-medium" aria-live="polite">
+                {chosen.length} selected
+              </span>
+              {chosen.length === 1 && chosen[0].kind === "file" && (
+                <a
+                  href={api.fileUrl(drive, chosen[0].id)}
+                  download={chosen[0].name}
+                  className="inline-flex items-center gap-2 rounded-md border border-line bg-surface px-3 py-1.5 text-sm font-medium hover:bg-ink/5"
+                >
+                  <Download size={16} />
+                  Download
+                </a>
               )}
+              {chosen.length === 1 && (
+                <Button className="py-1.5" onClick={() => setOpen({ type: "rename", entry: chosen[0] })}>
+                  <Pencil size={16} />
+                  Rename
+                </Button>
+              )}
+              <Button className="py-1.5" onClick={() => setOpen({ type: "move", entries: chosen })}>
+                <FolderInput size={16} />
+                Move
+              </Button>
+              <Button variant="danger" className="py-1.5" onClick={() => setOpen({ type: "delete", entries: chosen })}>
+                <Trash2 size={16} />
+                Delete
+              </Button>
+              <button type="button" onClick={clearSelection} aria-label="Clear selection" className={ICON_BUTTON}>
+                <X size={18} />
+              </button>
             </div>
           )}
 
-          {searching && search.data && entries.length === 0 && (
-            <p className="border-y border-line py-12 text-muted">Nothing in {drive} has a name matching “{query}”.</p>
-          )}
+          <div
+            className={`mt-4 rounded-lg border ${dragging ? "border-dashed border-teal bg-teal/5" : "border-transparent"}`}
+          >
+            {searching && (
+              <p className="pb-3 text-sm text-muted" aria-live="polite">
+                {search.isPending
+                  ? "Searching…"
+                  : search.error
+                    ? ""
+                    : search.data && search.data.total > search.data.results.length
+                      ? `Showing the best ${search.data.results.length} of ${search.data.total} matches in ${drive}.`
+                      : `${search.data?.total ?? 0} ${search.data?.total === 1 ? "match" : "matches"} in ${drive}.`}
+              </p>
+            )}
+            {searching && search.error && <ErrorNote>{search.error.message}</ErrorNote>}
 
-          {!searching && listing.data && entries.length === 0 && (
-            <p className="border-y border-line py-12 text-muted">
-              {dragging ? "Drop to upload here." : "This folder is empty. Drop files here, or choose Upload files."}
-            </p>
-          )}
+            {!searching && listing.isPending && <p className="py-10 text-muted">Loading…</p>}
 
-          {entries.length > 0 && view === "list" && (
-            <>
-              <div className="flex items-center gap-3 border-t border-line px-1 py-2 text-xs font-medium uppercase tracking-wide text-muted">
-                <input
-                  type="checkbox"
-                  aria-label="Select all"
-                  checked={allSelected}
-                  ref={(el) => {
-                    if (el) el.indeterminate = selecting && !allSelected;
-                  }}
-                  onChange={() => (allSelected ? clearSelection() : setSelected(new Set(entries.map((e) => e.id))))}
-                  className="h-4 w-4 accent-[var(--teal)]"
-                />
-                <span className="flex-1 pl-[52px]">Name</span>
-                <span className="hidden w-24 text-right sm:block">Size</span>
-                <span className="hidden w-28 text-right md:block">Added</span>
-                <span className="w-[68px]" aria-hidden="true" />
+            {!searching && listing.error && !driveLocked && status !== 401 && (
+              <div className="space-y-3 py-6">
+                <ErrorNote>{status === 404 ? "This folder no longer exists." : listing.error.message}</ErrorNote>
+                {status === 404 && (
+                  <Link to={driveUrl(drive)} className="text-sm text-teal underline underline-offset-2">
+                    Go to the top of {drive}
+                  </Link>
+                )}
               </div>
-              <ul className="divide-y divide-line border-y border-line">
-                {entries.map((entry, i) => (
-                  <li
-                    key={entry.id}
-                    className={`flex items-center gap-3 pl-1 ${selected.has(entry.id) ? "bg-teal/10" : "hover:bg-ink/[0.03]"}`}
-                  >
-                    {checkbox(entry, i)}
-                    <Opener
-                      drive={drive}
-                      entry={entry}
-                      onClick={claimClick(i)}
-                      onPreview={() => setOpen({ type: "preview", entry })}
-                      className="flex min-w-0 flex-1 items-center gap-3 py-2"
-                    >
-                      <Thumb drive={drive} entry={entry} />
-                      <span className="min-w-0">
-                        <span className={`block truncate ${entry.kind === "dir" ? "font-medium" : ""}`}>
-                          {entry.name}
-                        </span>
-                        {locations.has(entry.id) && (
-                          <span className="block truncate text-xs text-muted">
-                            {where(drive, locations.get(entry.id) ?? [])}
-                          </span>
-                        )}
-                      </span>
-                    </Opener>
+            )}
 
-                    <span className="hidden w-24 shrink-0 text-right text-sm tabular-nums text-muted sm:block">
-                      {entry.kind === "file" ? formatSize(entry.size) : ""}
-                    </span>
-                    <span className="hidden w-28 shrink-0 text-right text-sm text-muted md:block">
-                      {formatDate(entry.created_at)}
-                    </span>
+            {searching && search.data && entries.length === 0 && (
+              <p className="border-y border-line py-12 text-muted">
+                Nothing in {drive} has a name matching “{query}”.
+              </p>
+            )}
 
-                    <div className="flex shrink-0 items-center">
-                      {entry.kind === "file" ? (
-                        <a
-                          href={api.fileUrl(drive, entry.id)}
-                          download={entry.name}
-                          aria-label={`Download ${entry.name}`}
-                          title="Download"
-                          className={ICON_BUTTON}
-                        >
-                          <Download size={18} />
-                        </a>
-                      ) : (
-                        <span className="w-[34px]" aria-hidden="true" />
-                      )}
-                      {itemMenu(entry)}
-                    </div>
-                  </li>
-                ))}
-              </ul>
-            </>
-          )}
+            {!searching && listing.data && entries.length === 0 && (
+              <p className="border-y border-line py-12 text-muted">
+                {dragging
+                  ? "Drop to upload here."
+                  : "This folder is empty. Drop files or folders here, or choose Upload files."}
+              </p>
+            )}
 
-          {entries.length > 0 && view === "grid" && (
-            <ul className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
-              {entries.map((entry, i) => {
-                const isSelected = selected.has(entry.id);
-                return (
-                  <li
-                    key={entry.id}
-                    className={`group relative rounded-lg border bg-surface ${isSelected ? "border-teal ring-2 ring-teal" : "border-line hover:border-muted"}`}
-                  >
-                    <Opener
-                      drive={drive}
-                      entry={entry}
-                      onClick={claimClick(i)}
-                      onPreview={() => setOpen({ type: "preview", entry })}
-                      className="block w-full"
-                    >
-                      <Thumb drive={drive} entry={entry} large />
-                      <span className="block px-2.5 py-2">
-                        <span className={`block truncate text-sm ${entry.kind === "dir" ? "font-medium" : ""}`}>
-                          {entry.name}
-                        </span>
-                        <span className="block truncate text-xs text-muted">
-                          {locations.has(entry.id)
-                            ? where(drive, locations.get(entry.id) ?? [])
-                            : entry.kind === "file"
-                              ? formatSize(entry.size)
-                              : "Folder"}
-                        </span>
-                      </span>
-                    </Opener>
-                    <span
-                      className={`absolute left-2 top-2 flex rounded bg-surface/90 p-1 shadow-sm ${selecting || isSelected ? "" : "opacity-0 focus-within:opacity-100 group-hover:opacity-100 [@media(hover:none)]:opacity-100"}`}
+            {entries.length > 0 && view === "list" && (
+              <>
+                <div className="flex items-center gap-3 border-t border-line px-1 py-2 text-xs font-medium uppercase tracking-wide text-muted">
+                  <input
+                    type="checkbox"
+                    aria-label="Select all"
+                    checked={allSelected}
+                    ref={(el) => {
+                      if (el) el.indeterminate = selecting && !allSelected;
+                    }}
+                    onChange={() => (allSelected ? clearSelection() : setSelected(new Set(entries.map((e) => e.id))))}
+                    className="h-4 w-4 accent-[var(--teal)]"
+                  />
+                  <span className="flex-1 pl-[52px]">Name</span>
+                  <span className="hidden w-24 text-right sm:block">Size</span>
+                  <span className="hidden w-28 text-right md:block">Added</span>
+                  <span className="w-[68px]" aria-hidden="true" />
+                </div>
+                <ul className="divide-y divide-line border-y border-line">
+                  {entries.map((entry, i) => (
+                    <li
+                      key={entry.id}
+                      className={`flex items-center gap-3 pl-1 ${selected.has(entry.id) ? "bg-teal/10" : "hover:bg-ink/[0.03]"}`}
                     >
                       {checkbox(entry, i)}
-                    </span>
-                    <span className="absolute right-1 top-1 rounded-md bg-surface/90 opacity-0 shadow-sm focus-within:opacity-100 group-hover:opacity-100 [@media(hover:none)]:opacity-100">
-                      {itemMenu(entry)}
-                    </span>
-                  </li>
-                );
-              })}
-            </ul>
-          )}
+                      <Opener
+                        drive={drive}
+                        entry={entry}
+                        onClick={claimClick(i)}
+                        onPreview={() => setOpen({ type: "preview", entry })}
+                        className="flex min-w-0 flex-1 items-center gap-3 py-2"
+                      >
+                        <Thumb drive={drive} entry={entry} />
+                        <span className="min-w-0">
+                          <span className={`block truncate ${entry.kind === "dir" ? "font-medium" : ""}`}>
+                            {entry.name}
+                          </span>
+                          {locations.has(entry.id) && (
+                            <span className="block truncate text-xs text-muted">
+                              {where(drive, locations.get(entry.id) ?? [])}
+                            </span>
+                          )}
+                        </span>
+                      </Opener>
 
-          {entries.length > 0 && (
-            <p className="mt-3 text-xs text-muted">
-              Ctrl/Cmd-click or Shift-click to select several. Ctrl/Cmd+A selects everything, Delete deletes the
-              selection, F2 renames, / searches.
-            </p>
-          )}
-        </div>
-      </main>
+                      <span className="hidden w-24 shrink-0 text-right text-sm tabular-nums text-muted sm:block">
+                        {entry.kind === "file" ? formatSize(entry.size) : ""}
+                      </span>
+                      <span className="hidden w-28 shrink-0 text-right text-sm text-muted md:block">
+                        {formatDate(entry.created_at)}
+                      </span>
+
+                      <div className="flex shrink-0 items-center">
+                        {entry.kind === "file" ? (
+                          <a
+                            href={api.fileUrl(drive, entry.id)}
+                            download={entry.name}
+                            aria-label={`Download ${entry.name}`}
+                            title="Download"
+                            className={ICON_BUTTON}
+                          >
+                            <Download size={18} />
+                          </a>
+                        ) : (
+                          <span className="w-[34px]" aria-hidden="true" />
+                        )}
+                        {itemMenu(entry)}
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              </>
+            )}
+
+            {entries.length > 0 && view === "grid" && (
+              <ul className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
+                {entries.map((entry, i) => {
+                  const isSelected = selected.has(entry.id);
+                  return (
+                    <li
+                      key={entry.id}
+                      className={`group relative rounded-lg border bg-surface ${isSelected ? "border-teal ring-2 ring-teal" : "border-line hover:border-muted"}`}
+                    >
+                      <Opener
+                        drive={drive}
+                        entry={entry}
+                        onClick={claimClick(i)}
+                        onPreview={() => setOpen({ type: "preview", entry })}
+                        className="block w-full"
+                      >
+                        <Thumb drive={drive} entry={entry} large />
+                        <span className="block px-2.5 py-2">
+                          <span className={`block truncate text-sm ${entry.kind === "dir" ? "font-medium" : ""}`}>
+                            {entry.name}
+                          </span>
+                          <span className="block truncate text-xs text-muted">
+                            {locations.has(entry.id)
+                              ? where(drive, locations.get(entry.id) ?? [])
+                              : entry.kind === "file"
+                                ? formatSize(entry.size)
+                                : "Folder"}
+                          </span>
+                        </span>
+                      </Opener>
+                      <span
+                        className={`absolute left-2 top-2 flex rounded bg-surface/90 p-1 shadow-sm ${selecting || isSelected ? "" : "opacity-0 focus-within:opacity-100 group-hover:opacity-100 [@media(hover:none)]:opacity-100"}`}
+                      >
+                        {checkbox(entry, i)}
+                      </span>
+                      <span className="absolute right-1 top-1 rounded-md bg-surface/90 opacity-0 shadow-sm focus-within:opacity-100 group-hover:opacity-100 [@media(hover:none)]:opacity-100">
+                        {itemMenu(entry)}
+                      </span>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+
+            {entries.length > 0 && (
+              <p className="mt-3 text-xs text-muted">
+                Ctrl/Cmd-click or Shift-click to select several. Ctrl/Cmd+A selects everything, Delete deletes the
+                selection, F2 renames, / searches.
+              </p>
+            )}
+          </div>
+        </main>
+      </div>
 
       {open?.type === "newFolder" && (
         <NameDialog
@@ -845,13 +845,24 @@ export default function BrowserPage() {
           If you forget this drive's password, this key is the only way back into it.
         </RecoveryKeyDialog>
       )}
-      {open?.type === "deleteDrive" && (
-        <DeleteDriveDialog
+      {open?.type === "renameDrive" && (
+        <RenameDriveDialog
           drive={drive}
-          isProtected={info?.protected ?? true}
           onClose={close}
-          onDeleted={leaveDrive}
+          onRenamed={(name) => {
+            uploads.renameDrive(drive, name);
+            // The list shows the new name straight away; the old name's cache goes once the page has moved.
+            queryClient.setQueryData<DriveInfo[]>(["drives"], (list) =>
+              list?.map((d) => (d.name === drive ? { ...d, name } : d)),
+            );
+            renamedFrom.current = drive;
+            navigate(`${driveUrl(name, parent)}${location.search}`, { replace: true });
+            close();
+          }}
         />
+      )}
+      {open?.type === "deleteDrive" && (
+        <DeleteDriveDialog drive={drive} isProtected={info?.protected ?? true} onClose={close} onDeleted={leaveDrive} />
       )}
     </div>
   );

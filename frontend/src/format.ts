@@ -46,3 +46,12 @@ export const DRIVE_NAME = /^[A-Za-z0-9][A-Za-z0-9 _.-]*$/;
 
 export const driveUrl = (drive: string, folderId?: string | null) =>
   `/d/${encodeURIComponent(drive)}${folderId ? `/${folderId}` : ""}`;
+
+/** A rough time left, e.g. "40 s", "12 min", "2 h 5 min". */
+export function formatDuration(seconds: number): string {
+  const s = Math.max(1, Math.round(seconds));
+  if (s < 60) return `${s} s`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m} min`;
+  return `${Math.floor(m / 60)} h ${m % 60} min`;
+}

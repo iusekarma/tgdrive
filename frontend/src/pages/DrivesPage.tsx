@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { HardDrive, KeyRound, Lock, LockOpen, Plus, ShieldPlus, Trash2 } from "lucide-react";
+import { HardDrive, KeyRound, Lock, LockOpen, Pencil, Plus, ShieldPlus, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
@@ -10,11 +10,13 @@ import {
   DrivePasswordDialog,
   MasterPasswordDialog,
   RecoveryKeyDialog,
+  RenameDriveDialog,
   UnlockDialog,
   type PasswordAction,
 } from "../components/driveDialogs";
 import LockDial from "../components/LockDial";
-import { Button, ErrorNote, ICON_BUTTON, Menu, MenuItem, PageHeader } from "../components/ui";
+import { Button, ErrorNote, ICON_BUTTON, Menu, MenuItem, PageHeader, useSavedView, ViewToggle } from "../components/ui";
+import { useUploads } from "../components/uploads";
 import { useLockEverything } from "../components/VaultGate";
 import { driveUrl } from "../format";
 import { forgetThumbnails } from "../thumbs";
@@ -25,10 +27,15 @@ type Open =
   | { type: "unlock"; drive: string; returnTo: string | null }
   | { type: "create" }
   | { type: "password"; drive: string; action: PasswordAction }
+  | { type: "rename"; drive: string }
   | { type: "delete"; drive: DriveInfo }
   | { type: "recoveryKey"; drive: string; recoveryKey: string; open: boolean }
   | { type: "masterPassword" }
   | null;
+
+function status(d: DriveInfo): string {
+  return !d.protected ? "Opens with the master password" : d.unlocked ? "Unlocked" : "Locked";
+}
 
 function DriveIcon({ drive }: { drive: DriveInfo }) {
   if (drive.protected) return <LockDial unlocked={drive.unlocked} />;
@@ -44,6 +51,8 @@ export default function DrivesPage() {
   const location = useLocation();
   const queryClient = useQueryClient();
   const lockEverything = useLockEverything();
+  const uploads = useUploads();
+  const [view, changeView] = useSavedView("tgdrive.drivesView");
   const routeState = location.state as RouteState;
 
   // Arriving here from a drive whose session expired opens its unlock dialog straight away.
@@ -71,6 +80,61 @@ export default function DrivesPage() {
   function openDrive(d: DriveInfo) {
     if (d.unlocked) navigate(driveUrl(d.name));
     else setOpen({ type: "unlock", drive: d.name, returnTo: null });
+  }
+
+  function driveMenu(d: DriveInfo) {
+    return (
+      <Menu label={`More actions for ${d.name}`}>
+        {(closeMenu) => {
+          const pick = (next: Open) => () => {
+            closeMenu();
+            setOpen(next);
+          };
+          return (
+            <>
+              {d.protected && d.unlocked && (
+                <MenuItem
+                  onSelect={() => {
+                    closeMenu();
+                    void lockDrive(d.name);
+                  }}
+                >
+                  <Lock size={16} />
+                  Lock drive
+                </MenuItem>
+              )}
+              {d.unlocked && (
+                <MenuItem onSelect={pick({ type: "rename", drive: d.name })}>
+                  <Pencil size={16} />
+                  Rename drive
+                </MenuItem>
+              )}
+              {d.protected ? (
+                <>
+                  <MenuItem onSelect={pick({ type: "password", drive: d.name, action: "change" })}>
+                    <KeyRound size={16} />
+                    Change password
+                  </MenuItem>
+                  <MenuItem onSelect={pick({ type: "password", drive: d.name, action: "remove" })}>
+                    <LockOpen size={16} />
+                    Remove password
+                  </MenuItem>
+                </>
+              ) : (
+                <MenuItem onSelect={pick({ type: "password", drive: d.name, action: "add" })}>
+                  <ShieldPlus size={16} />
+                  Add a password
+                </MenuItem>
+              )}
+              <MenuItem danger onSelect={pick({ type: "delete", drive: d })}>
+                <Trash2 size={16} />
+                Delete drive
+              </MenuItem>
+            </>
+          );
+        }}
+      </Menu>
+    );
   }
 
   return (
@@ -104,10 +168,13 @@ export default function DrivesPage() {
               your keys. A drive can also have its own password.
             </p>
           </div>
-          <Button variant="primary" onClick={() => setOpen({ type: "create" })}>
-            <Plus size={16} />
-            Create drive
-          </Button>
+          <div className="flex items-center gap-2">
+            <ViewToggle view={view} onChange={changeView} />
+            <Button variant="primary" onClick={() => setOpen({ type: "create" })}>
+              <Plus size={16} />
+              Create drive
+            </Button>
+          </div>
         </div>
 
         <div className="mt-10">
@@ -116,7 +183,7 @@ export default function DrivesPage() {
           {drives.data?.length === 0 && (
             <p className="border-y border-line py-10 text-muted">No drives yet. Create one to start storing files.</p>
           )}
-          {drives.data && drives.data.length > 0 && (
+          {drives.data && drives.data.length > 0 && view === "list" && (
             <ul className="divide-y divide-line border-y border-line">
               {drives.data.map((d) => (
                 <li key={d.name} className="flex items-center gap-1 pr-1 hover:bg-ink/[0.03]">
@@ -128,9 +195,7 @@ export default function DrivesPage() {
                     <DriveIcon drive={d} />
                     <span className="min-w-0 flex-1">
                       <span className="block truncate text-2xl font-semibold tracking-tight">{d.name}</span>
-                      <span className="block text-sm text-muted">
-                        {!d.protected ? "Opens with the master password" : d.unlocked ? "Unlocked" : "Locked"}
-                      </span>
+                      <span className="block text-sm text-muted">{status(d)}</span>
                     </span>
                     <span className="text-sm font-medium text-teal">{d.unlocked ? "Open" : "Unlock"}</span>
                   </button>
@@ -143,50 +208,28 @@ export default function DrivesPage() {
                   >
                     <Trash2 size={18} />
                   </button>
-                  <Menu label={`More actions for ${d.name}`}>
-                    {(closeMenu) => {
-                      const pick = (next: Open) => () => {
-                        closeMenu();
-                        setOpen(next);
-                      };
-                      return (
-                        <>
-                          {d.protected && d.unlocked && (
-                            <MenuItem
-                              onSelect={() => {
-                                closeMenu();
-                                void lockDrive(d.name);
-                              }}
-                            >
-                              <Lock size={16} />
-                              Lock drive
-                            </MenuItem>
-                          )}
-                          {d.protected ? (
-                            <>
-                              <MenuItem onSelect={pick({ type: "password", drive: d.name, action: "change" })}>
-                                <KeyRound size={16} />
-                                Change password
-                              </MenuItem>
-                              <MenuItem onSelect={pick({ type: "password", drive: d.name, action: "remove" })}>
-                                <LockOpen size={16} />
-                                Remove password
-                              </MenuItem>
-                            </>
-                          ) : (
-                            <MenuItem onSelect={pick({ type: "password", drive: d.name, action: "add" })}>
-                              <ShieldPlus size={16} />
-                              Add a password
-                            </MenuItem>
-                          )}
-                          <MenuItem danger onSelect={pick({ type: "delete", drive: d })}>
-                            <Trash2 size={16} />
-                            Delete drive
-                          </MenuItem>
-                        </>
-                      );
-                    }}
-                  </Menu>
+                  {driveMenu(d)}
+                </li>
+              ))}
+            </ul>
+          )}
+          {drives.data && drives.data.length > 0 && view === "grid" && (
+            <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2 md:grid-cols-3">
+              {drives.data.map((d) => (
+                <li key={d.name} className="relative rounded-xl border border-line bg-surface hover:border-muted">
+                  <button
+                    type="button"
+                    onClick={() => openDrive(d)}
+                    className="flex w-full flex-col items-start gap-4 rounded-xl p-5 text-left"
+                  >
+                    <DriveIcon drive={d} />
+                    <span className="block w-full min-w-0">
+                      <span className="block truncate text-xl font-semibold tracking-tight">{d.name}</span>
+                      <span className="block truncate text-sm text-muted">{status(d)}</span>
+                    </span>
+                    <span className="text-sm font-medium text-teal">{d.unlocked ? "Open" : "Unlock"}</span>
+                  </button>
+                  <span className="absolute right-2 top-2">{driveMenu(d)}</span>
                 </li>
               ))}
             </ul>
@@ -226,6 +269,19 @@ export default function DrivesPage() {
             void refreshDrives();
             if (recoveryKey) setOpen({ type: "recoveryKey", drive: open.drive, recoveryKey, open: false });
             else close();
+          }}
+        />
+      )}
+      {open?.type === "rename" && (
+        <RenameDriveDialog
+          drive={open.drive}
+          onClose={close}
+          onRenamed={(name) => {
+            uploads.renameDrive(open.drive, name);
+            queryClient.removeQueries({ queryKey: ["nodes", open.drive] });
+            forgetThumbnails(open.drive);
+            void refreshDrives();
+            close();
           }}
         />
       )}
