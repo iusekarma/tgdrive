@@ -1,4 +1,5 @@
-import { api, type Entry } from "./api";
+import { api, type Entry, type FileInfo } from "./api";
+import { readExif, seconds } from "./fileinfo";
 import { previewKind } from "./format";
 
 /** Matches the server: larger images are not fetched from Telegram just to thumbnail them. */
@@ -92,10 +93,14 @@ function toBlob(source: CanvasImageSource, width: number, height: number): Promi
   return new Promise((resolve) => canvas.toBlob(resolve, "image/webp", 0.8));
 }
 
-async function fromImage(file: Blob): Promise<Blob | null> {
+/** A thumbnail (when one can be drawn) and what was learned while decoding. */
+type Look = { image: Blob | null; info: FileInfo };
+
+async function fromImage(file: Blob): Promise<Look> {
   const bitmap = await createImageBitmap(file);
   try {
-    return await toBlob(bitmap, bitmap.width, bitmap.height);
+    const info = { width: bitmap.width, height: bitmap.height, ...(await readExif(file)) };
+    return { image: await toBlob(bitmap, bitmap.width, bitmap.height), info };
   } finally {
     bitmap.close();
   }
@@ -107,44 +112,87 @@ export function captureFrame(video: HTMLVideoElement): Promise<Blob | null> {
   return toBlob(video, video.videoWidth, video.videoHeight);
 }
 
-/** Seeks to about 10% in (at most 30 s), so the frame isn't a black title card. */
-function fromVideo(file: Blob): Promise<Blob | null> {
+/** Loads local media far enough to answer `read`, then lets it go. */
+function fromMedia(
+  file: Blob,
+  tag: "video" | "audio",
+  read: (media: HTMLMediaElement, done: (look: Look) => void, info: FileInfo) => void,
+): Promise<Look> {
   return new Promise((resolve) => {
     const url = URL.createObjectURL(file);
-    const video = document.createElement("video");
-    const done = (result: Blob | null) => {
+    const media = document.createElement(tag);
+    const info: FileInfo = {};
+    const done = (look: Look) => {
       clearTimeout(timer);
-      video.removeAttribute("src");
-      video.load();
+      media.removeAttribute("src");
+      media.load();
       URL.revokeObjectURL(url);
-      resolve(result);
+      resolve(look);
     };
-    const timer = setTimeout(() => done(null), 15_000);
-    video.muted = true;
-    video.preload = "auto";
-    video.onloadedmetadata = () => {
-      video.currentTime = Number.isFinite(video.duration) ? Math.min(video.duration * 0.1, 30) : 0;
-    };
-    video.onseeked = () => void captureFrame(video).then(done, () => done(null));
-    video.onerror = () => done(null);
-    video.src = url;
+    const timer = setTimeout(() => done({ image: null, info }), 15_000);
+    media.muted = true;
+    media.preload = tag === "video" ? "auto" : "metadata";
+    media.onerror = () => done({ image: null, info });
+    read(media, done, info);
+    media.src = url;
   });
 }
 
+/** Seeks to about 10% in (at most 30 s), so the frame isn't a black title card. */
+const fromVideo = (file: Blob) =>
+  fromMedia(file, "video", (media, done, info) => {
+    const video = media as HTMLVideoElement;
+    video.onloadedmetadata = () => {
+      Object.assign(info, { width: video.videoWidth || undefined, height: video.videoHeight || undefined });
+      info.duration = seconds(video.duration);
+      video.currentTime = Number.isFinite(video.duration) ? Math.min(video.duration * 0.1, 30) : 0;
+    };
+    video.onseeked = () =>
+      void captureFrame(video).then(
+        (image) => done({ image, info }),
+        () => done({ image: null, info }),
+      );
+  });
+
+const fromAudio = (file: Blob) =>
+  fromMedia(file, "audio", (audio, done, info) => {
+    audio.onloadedmetadata = () => {
+      info.duration = seconds(audio.duration);
+      done({ image: null, info });
+    };
+  });
+
 /** Made from the local copy right after an upload, so Telegram is never asked
- * for the file. Best effort: formats the browser can't decode get no thumbnail. */
-export async function sendThumbnail(drive: string, id: string, file: File): Promise<boolean> {
+ * for the file: a thumbnail for images and videos, and details (dimensions,
+ * duration, when it was taken) for anything. Best effort: formats the browser
+ * can't decode get neither. Returns the details as the server now has them. */
+export async function sendDetails(
+  drive: string,
+  id: string,
+  file: File,
+): Promise<{ thumb: boolean; info: FileInfo | null }> {
   const kind = previewKind(file.name);
-  if (kind !== "image" && kind !== "video") return false;
+  let look: Look = { image: null, info: {} };
   try {
-    const image = kind === "image" ? await fromImage(file) : await fromVideo(file);
-    if (!image) return false;
-    await api.putThumbnail(drive, id, image);
-    remember(drive, id, image);
-    return true;
+    if (kind === "image") look = await fromImage(file);
+    else if (kind === "video") look = await fromVideo(file);
+    else if (kind === "audio") look = await fromAudio(file);
   } catch {
-    return false;
+    // Not decodable here; the file's own date is still worth keeping.
   }
+  let thumb = false;
+  if (look.image) {
+    try {
+      await api.putThumbnail(drive, id, look.image);
+      remember(drive, id, look.image);
+      thumb = true;
+    } catch {
+      /* shown as an icon */
+    }
+  }
+  const fields = { ...look.info, modified: Math.floor(file.lastModified / 1000) };
+  const info = await api.putFileInfo(drive, id, fields).catch(() => null);
+  return { thumb, info };
 }
 
 /** For videos uploaded before thumbnails existed: saves the frame being watched. */

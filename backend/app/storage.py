@@ -842,6 +842,10 @@ class Storage:
                     if not os.path.exists(path):
                         async with self._thumb_gate:
                             data = b"".join([c async for c in self.download(drive, node_id)])
+                            # The whole image is here anyway, so its details cost nothing extra.
+                            details = await asyncio.to_thread(thumbs.describe, data)
+                            if details:
+                                self.set_info(drive, node_id, details)
                             try:
                                 await self.set_thumbnail(drive, node_id, data)
                             except thumbs.BadImage:
@@ -879,6 +883,25 @@ class Storage:
                 removed += 1
         self._trim_thumbnails()
         return removed
+
+    # --- file details -------------------------------------------------------
+
+    def info(self, drive: Drive, node_id: str) -> dict:
+        """What is known about a file beyond its name and size (dimensions,
+        duration, when it was taken...), sealed with the file's key.
+        Browsers send most of it; see set_info."""
+        file_key = self._file_key(drive, node_id)
+        blob = self._node(drive, node_id)["info_enc"]
+        return json.loads(crypto.decrypt_info(file_key, node_id, blob)) if blob else {}
+
+    def set_info(self, drive: Drive, node_id: str, fields: dict) -> dict:
+        """Merges `fields` into the file's details and returns them all."""
+        merged = {**self.info(drive, node_id), **fields}
+        file_key = self._file_key(drive, node_id)
+        blob = crypto.encrypt_info(file_key, node_id, json.dumps(merged, separators=(",", ":")).encode())
+        with self.conn:
+            self.conn.execute("UPDATE nodes SET info_enc = ? WHERE id = ?", (blob, node_id))
+        return merged
 
     # --- database backup ----------------------------------------------------
 

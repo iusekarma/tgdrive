@@ -34,6 +34,7 @@ erDiagram
         INTEGER chunk_size "chunk size used for this file"
         TEXT state "uploading | ready"
         INTEGER created_at
+        BLOB info_enc "file details as JSON, sealed with the file key; NULL if none"
     }
     chunks {
         TEXT node_id PK,FK

@@ -89,6 +89,7 @@ around without detection:
 | File key | `tgdrive/file-key\|<node id>` |
 | Name | `tgdrive/name\|<node id>` |
 | Thumbnail | `tgdrive/thumbnail\|<node id>` |
+| File details | `tgdrive/info\|<node id>` |
 | Chunk | `tgdrive/chunk\|<node id>\|<index: 8 bytes>\|<final: 1 byte>` |
 | Snapshot | `tgdrive/snapshot` |
 

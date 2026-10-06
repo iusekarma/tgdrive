@@ -11,10 +11,12 @@ import {
   FolderPlus,
   FolderUp,
   Image as ImageIcon,
+  Info,
   KeyRound,
   Lock,
   LockOpen,
   Music,
+  PanelRight,
   Pencil,
   Search,
   ShieldPlus,
@@ -33,6 +35,7 @@ import {
   RenameDriveDialog,
   type PasswordAction,
 } from "../components/driveDialogs";
+import { DetailsDialog, DetailsPanel } from "../components/details";
 import { DeleteNodeDialog, MoveDialog, NameDialog, PreviewDialog } from "../components/fileDialogs";
 import Sidebar from "../components/Sidebar";
 import { Button, ErrorNote, ICON_BUTTON, Menu, MenuItem, PageHeader, useSavedView, ViewToggle } from "../components/ui";
@@ -46,6 +49,7 @@ type Open =
   | { type: "move"; entries: Entry[] }
   | { type: "delete"; entries: Entry[] }
   | { type: "preview"; entry: Entry }
+  | { type: "details"; entry: Entry }
   | { type: "password"; action: PasswordAction }
   | { type: "recoveryKey"; recoveryKey: string }
   | { type: "renameDrive" }
@@ -152,6 +156,28 @@ function where(drive: string, path: Crumb[]): string {
   return [drive, ...path.map((c) => c.name)].join(" › ");
 }
 
+const DETAILS_KEY = "tgdrive.details";
+
+/** Whether the details panel is shown, remembered in this browser. */
+function useDetailsPanel(): [boolean, (show: boolean) => void] {
+  const [show, setShow] = useState(() => {
+    try {
+      return localStorage.getItem(DETAILS_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
+  function change(next: boolean) {
+    setShow(next);
+    try {
+      localStorage.setItem(DETAILS_KEY, next ? "1" : "0");
+    } catch {
+      /* private mode: the choice just isn't remembered */
+    }
+  }
+  return [show, change];
+}
+
 /** Shortcuts stay off while typing, but not while a selection checkbox has focus. */
 const typingIn = (target: EventTarget | null) => {
   if (target instanceof HTMLInputElement) return !["checkbox", "radio", "button", "submit"].includes(target.type);
@@ -170,6 +196,7 @@ export default function BrowserPage() {
   const [notice, setNotice] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
   const [view, changeView] = useSavedView("tgdrive.view");
+  const [showDetails, setShowDetails] = useDetailsPanel();
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const anchor = useRef<number | null>(null);
   const dragDepth = useRef(0);
@@ -241,6 +268,7 @@ export default function BrowserPage() {
   const entries: Entry[] = searching ? results : (listing.data?.entries ?? []);
   const crumbs = listing.data?.path ?? [];
   const chosen = entries.filter((e) => selected.has(e.id));
+  const locationOf = (entry: Entry) => where(drive, locations.get(entry.id) ?? crumbs);
   const selecting = chosen.length > 0;
 
   const refresh = () => queryClient.invalidateQueries({ queryKey: ["nodes", drive] });
@@ -362,6 +390,10 @@ export default function BrowserPage() {
                   Show in folder
                 </MenuItem>
               )}
+              <MenuItem onSelect={pick({ type: "details", entry })}>
+                <Info size={16} />
+                Details
+              </MenuItem>
               <MenuItem onSelect={pick({ type: "rename", entry })}>
                 <Pencil size={16} />
                 Rename
@@ -554,6 +586,16 @@ export default function BrowserPage() {
               />
             </label>
             <ViewToggle view={view} onChange={changeView} className="ml-auto sm:ml-0" />
+            <button
+              type="button"
+              aria-pressed={showDetails}
+              aria-label="Details panel"
+              title={showDetails ? "Hide details" : "Show details"}
+              onClick={() => setShowDetails(!showDetails)}
+              className={`hidden rounded-md border border-line p-2 xl:inline-flex ${showDetails ? "bg-teal text-teal-ink" : "bg-surface text-muted hover:text-ink"}`}
+            >
+              <PanelRight size={16} />
+            </button>
           </div>
 
           {notice && (
@@ -770,6 +812,17 @@ export default function BrowserPage() {
             )}
           </div>
         </main>
+
+        {showDetails && (
+          <DetailsPanel
+            drive={drive}
+            chosen={chosen}
+            here={searching ? `Matches for “${query}”` : crumbs.length ? crumbs[crumbs.length - 1].name : drive}
+            entries={entries}
+            locationOf={locationOf}
+            onClose={() => setShowDetails(false)}
+          />
+        )}
       </div>
 
       {open?.type === "newFolder" && (
@@ -830,6 +883,9 @@ export default function BrowserPage() {
         />
       )}
       {open?.type === "preview" && <PreviewDialog drive={drive} entry={open.entry} onClose={close} />}
+      {open?.type === "details" && (
+        <DetailsDialog drive={drive} entry={open.entry} location={locationOf(open.entry)} onClose={close} />
+      )}
       {open?.type === "password" && (
         <DrivePasswordDialog
           drive={drive}

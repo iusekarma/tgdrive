@@ -46,6 +46,7 @@ invalidation refreshes everything affected:
 | `["drives"]` | `GET /drives` | Drives created, renamed, deleted, locked, password changed |
 | `["nodes", drive, parent]` | One folder listing | Any change in that drive (`["nodes", drive]` prefix) |
 | `["nodes", drive, "search", q]` | Search results | Same prefix, so results refresh with the folder |
+| `["info", drive, id]` | A file's details | Never refetched (`staleTime: Infinity`); updated in place by whatever learns more |
 
 Queries do not retry 4xx answers (a locked drive won't unlock itself) and
 are fresh for 5 s.
@@ -158,8 +159,9 @@ sending, 20 s while the server is storing (it moves 16 MiB at a time).
 When the server reports a `wait`, the row says why ("Telegram asked to slow
 down. Trying again in 12 s.").
 
-**After an upload**, `sendThumbnail()` makes a thumbnail from the local
-copy in the background while the next file starts.
+**After an upload**, `sendDetails()` makes a thumbnail and reads the
+file's details from the local copy in the background while the next file
+starts.
 
 The chevron in the panel's header folds the list away, leaving the header
 with the overall progress (even for one file) and a count of failed or
@@ -183,17 +185,33 @@ revokes the URLs.
 has one, or it is an image of 50 MB or less (which the server can make on
 demand).
 
-**Making.** After an upload, `sendThumbnail()` draws an image, or a video
+**Making.** After an upload, `sendDetails()` draws an image, or a video
 frame about 10% in (at most 30 s), onto a canvas scaled to 320 px and
 `PUT`s it as WebP (PNG where WebP encoding is unsupported). The server
 re-encodes whatever it receives. This means Telegram is never asked for a
 file just to thumbnail it. `sendFrame()` does the same from a video being
 watched, for videos uploaded before thumbnails existed.
 
+The same decode yields the file's details (dimensions, length, EXIF date
+and camera, last-modified time), sent with one `PUT /files/{id}/info`.
+
+## fileinfo.ts
+
+File details are only ever gathered for free: from the local copy while
+uploading, from a preview already on screen, or by the server while making
+an image thumbnail. Nothing downloads a file just to describe it.
+
+`useFileInfo(drive, entry)` reads `GET /files/{id}/info` (database only).
+`useLearn(drive, id)` returns a function that previews call with what the
+media element found (`naturalWidth`, `videoWidth`, `duration`); it sends
+only fields that differ from what is cached. `readExif(file)` parses the
+date taken and camera from the first 256 KB of a local JPEG.
+
 ## format.ts
 
 Formatting and shared constants: `formatSize`, `formatDate`,
-`formatDuration`, `previewKind(name)` (image, video, audio, pdf, text or
+`formatDuration`, `formatLength` (media length), `formatDateTime`,
+`typeName(name)` ("JPEG image"), `previewKind(name)` (image, video, audio, pdf, text or
 none, by extension), `PASSWORD_MIN = 8`, `DRIVE_NAME` (same pattern as the
 server), and `driveUrl(drive, folderId)`.
 
@@ -227,6 +245,10 @@ The file browser for one drive and folder.
   `uploads.enqueue` for the current folder.
 - **Opening**: folders navigate; previewable files open `PreviewDialog`;
   others download.
+- **Details**: each item's menu has **Details**, which opens
+  `DetailsDialog`. On wide screens the panel button beside the view toggle
+  shows `DetailsPanel` (remembered in `localStorage`): the one selected item,
+  totals for several, or the folder when nothing is selected.
 
 ## components/Sidebar.tsx
 

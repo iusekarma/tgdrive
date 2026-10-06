@@ -213,6 +213,16 @@ def decrypt_thumbnail(file_key: bytes, node_id: str, blob: bytes) -> bytes:
     return _open(file_key, blob, b"tgdrive/thumbnail|" + node_id.encode())
 
 
+# --- file details -----------------------------------------------------------
+
+def encrypt_info(file_key: bytes, node_id: str, data: bytes) -> bytes:
+    return _seal(file_key, data, b"tgdrive/info|" + node_id.encode())
+
+
+def decrypt_info(file_key: bytes, node_id: str, blob: bytes) -> bytes:
+    return _open(file_key, blob, b"tgdrive/info|" + node_id.encode())
+
+
 # --- chunks -----------------------------------------------------------------
 
 def _chunk_aad(node_id: str, idx: int, final: bool) -> bytes:

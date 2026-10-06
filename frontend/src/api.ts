@@ -8,6 +8,17 @@ export type Entry = {
   created_at: number;
   thumb: boolean;
 };
+/** What is known about a file beyond its name and size; any field may be missing.
+ * `modified` is the file's own last-modified time in seconds; `taken` is
+ * "YYYY-MM-DD HH:MM:SS" in the camera's local time. */
+export type FileInfo = {
+  width?: number;
+  height?: number;
+  duration?: number;
+  modified?: number;
+  taken?: string;
+  camera?: string;
+};
 export type Crumb = { id: string; name: string };
 export type Listing = { path: Crumb[]; entries: Entry[] };
 /** `path` is the folders above the match, from the top of the drive. */
@@ -207,6 +218,11 @@ export const api = {
 
   fileUrl: (drive: string, id: string, inline = false) =>
     `/api${drivePath(drive)}/files/${id}${inline ? "?inline=true" : ""}`,
+  /** Read from the database only: never makes the server fetch the file. */
+  fileInfo: (drive: string, id: string) => request<FileInfo>("GET", `${drivePath(drive)}/files/${id}/info`),
+  /** Merges what is sent into what is known and returns it all. */
+  putFileInfo: (drive: string, id: string, info: FileInfo) =>
+    request<FileInfo>("PUT", `${drivePath(drive)}/files/${id}/info`, info),
   thumbnailUrl: (drive: string, id: string) => `/api${drivePath(drive)}/files/${id}/thumbnail`,
   putThumbnail: async (drive: string, id: string, image: Blob) => {
     const res = await fetch(`/api${drivePath(drive)}/files/${id}/thumbnail`, { method: "PUT", body: image });

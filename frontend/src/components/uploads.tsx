@@ -4,7 +4,8 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 
 import { api, ApiError, sendUpload, type Entry, type QueuedUpload, type UploadStatus, type UploadWait } from "../api";
 import { formatDuration, formatSize } from "../format";
-import { sendThumbnail } from "../thumbs";
+import { infoKey } from "../fileinfo";
+import { sendDetails } from "../thumbs";
 import { ICON_BUTTON } from "./ui";
 
 /** "interrupted": left unfinished on the server (e.g. by a closed tab) until its file is chosen again. */
@@ -426,8 +427,9 @@ export function UploadsProvider({ children }: { children: ReactNode }) {
             speed: average(job.run, file.size),
           });
           // Made from the local copy, alongside the next upload rather than before it.
-          void sendThumbnail(batch.drive, entry.id, file).then((sent) => {
-            if (sent) void queryClient.invalidateQueries({ queryKey: ["nodes", batch.drive] });
+          void sendDetails(batch.drive, entry.id, file).then(({ thumb, info }) => {
+            if (thumb) void queryClient.invalidateQueries({ queryKey: ["nodes", batch.drive] });
+            if (info) queryClient.setQueryData(infoKey(batch.drive, entry.id), info);
           });
         },
         (e: unknown) => {

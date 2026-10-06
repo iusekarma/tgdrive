@@ -43,7 +43,8 @@ CREATE TABLE IF NOT EXISTS nodes (
     size        INTEGER NOT NULL DEFAULT 0,
     chunk_size  INTEGER,
     state       TEXT NOT NULL DEFAULT 'ready' CHECK (state IN ('uploading', 'ready')),
-    created_at  INTEGER NOT NULL
+    created_at  INTEGER NOT NULL,
+    info_enc    BLOB
 );
 CREATE INDEX IF NOT EXISTS nodes_by_parent ON nodes(drive_id, parent_id);
 
@@ -66,6 +67,8 @@ def connect(path: str) -> sqlite3.Connection:
     _migrate(conn)
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(SCHEMA)
+    if "info_enc" not in [r["name"] for r in conn.execute("PRAGMA table_info(nodes)")]:
+        conn.execute("ALTER TABLE nodes ADD COLUMN info_enc BLOB")   # databases from before file details
     conn.commit()
     return conn
 

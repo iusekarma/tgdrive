@@ -55,3 +55,38 @@ export function formatDuration(seconds: number): string {
   if (m < 60) return `${m} min`;
   return `${Math.floor(m / 60)} h ${m % 60} min`;
 }
+
+/** A clock-style media length, e.g. "0:42", "12:05", "1:02:09". */
+export function formatLength(seconds: number): string {
+  const s = Math.round(seconds);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  return h ? `${h}:${pad(m)}:${pad(s % 60)}` : `${m}:${pad(s % 60)}`;
+}
+
+export function formatDateTime(date: Date): string {
+  return date.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+}
+
+const TYPE_NAMES: Record<string, string> = {
+  jpg: "JPEG image", jpeg: "JPEG image", png: "PNG image", gif: "GIF image", webp: "WebP image",
+  avif: "AVIF image", bmp: "BMP image", svg: "SVG image", heic: "HEIC image", tif: "TIFF image", tiff: "TIFF image",
+  mp4: "MP4 video", m4v: "MP4 video", mov: "QuickTime video", webm: "WebM video", mkv: "Matroska video",
+  avi: "AVI video", ogv: "Ogg video",
+  mp3: "MP3 audio", m4a: "AAC audio", aac: "AAC audio", wav: "WAV audio", flac: "FLAC audio",
+  ogg: "Ogg audio", opus: "Opus audio",
+  pdf: "PDF document", txt: "Plain text", md: "Markdown", csv: "CSV spreadsheet", json: "JSON",
+  zip: "ZIP archive", rar: "RAR archive", "7z": "7-Zip archive", tar: "Tar archive", gz: "Gzip archive",
+  doc: "Word document", docx: "Word document", xls: "Excel spreadsheet", xlsx: "Excel spreadsheet",
+  ppt: "PowerPoint deck", pptx: "PowerPoint deck", epub: "EPUB book", apk: "Android app", exe: "Windows program",
+  iso: "Disc image", dmg: "Disk image",
+};
+
+/** "JPEG image", "MP4 video"; files it doesn't know are named by extension, e.g. "XYZ file". */
+export function typeName(name: string): string {
+  const dot = name.lastIndexOf(".");
+  if (dot <= 0) return "File";
+  const ext = name.slice(dot + 1).toLowerCase();
+  return TYPE_NAMES[ext] ?? `${ext.toUpperCase()} file`;
+}

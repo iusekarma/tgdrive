@@ -2,7 +2,8 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronRight, Download, Folder } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 
-import { api, type Entry } from "../api";
+import { api, type Entry, type FileInfo } from "../api";
+import { seconds, useLearn } from "../fileinfo";
 import { formatSize, previewKind } from "../format";
 import { sendFrame } from "../thumbs";
 import { Button, Dialog, DialogActions, ErrorNote, Field, useSubmit } from "./ui";
@@ -235,7 +236,17 @@ function TextPreview({ url, size }: { url: string; size: number }) {
 
 /** Videos uploaded before thumbnails existed get one from the first frame
  * watched past the 2 s mark, so it isn't a black title card. */
-function VideoPreview({ drive, entry, url }: { drive: string; entry: Entry; url: string }) {
+function VideoPreview({
+  drive,
+  entry,
+  url,
+  learn,
+}: {
+  drive: string;
+  entry: Entry;
+  url: string;
+  learn: (info: FileInfo) => void;
+}) {
   const queryClient = useQueryClient();
   const captured = useRef(entry.thumb);
   return (
@@ -243,6 +254,14 @@ function VideoPreview({ drive, entry, url }: { drive: string; entry: Entry; url:
       src={url}
       controls
       className="max-h-[65vh] w-full rounded-md bg-black"
+      onLoadedMetadata={(e) => {
+        const video = e.currentTarget;
+        learn({
+          width: video.videoWidth || undefined,
+          height: video.videoHeight || undefined,
+          duration: seconds(video.duration),
+        });
+      }}
       onTimeUpdate={(e) => {
         const video = e.currentTarget;
         if (captured.current || video.currentTime < Math.min(2, video.duration / 2)) return;
@@ -258,12 +277,28 @@ function VideoPreview({ drive, entry, url }: { drive: string; entry: Entry; url:
 export function PreviewDialog({ drive, entry, onClose }: { drive: string; entry: Entry; onClose: () => void }) {
   const kind = previewKind(entry.name);
   const inlineUrl = api.fileUrl(drive, entry.id, true);
+  // The browser is loading the file to show it anyway, so what it finds out is kept.
+  const learn = useLearn(drive, entry.id);
   return (
     <Dialog title={entry.name} onClose={onClose} wide>
       <div className="flex justify-center">
-        {kind === "image" && <img src={inlineUrl} alt={entry.name} className="max-h-[65vh] max-w-full rounded-md" />}
-        {kind === "video" && <VideoPreview drive={drive} entry={entry} url={inlineUrl} />}
-        {kind === "audio" && <audio src={inlineUrl} controls className="w-full" />}
+        {kind === "image" && (
+          <img
+            src={inlineUrl}
+            alt={entry.name}
+            className="max-h-[65vh] max-w-full rounded-md"
+            onLoad={(e) => learn({ width: e.currentTarget.naturalWidth, height: e.currentTarget.naturalHeight })}
+          />
+        )}
+        {kind === "video" && <VideoPreview drive={drive} entry={entry} url={inlineUrl} learn={learn} />}
+        {kind === "audio" && (
+          <audio
+            src={inlineUrl}
+            controls
+            className="w-full"
+            onLoadedMetadata={(e) => learn({ duration: seconds(e.currentTarget.duration) })}
+          />
+        )}
         {kind === "pdf" && (
           <iframe src={inlineUrl} title={entry.name} className="h-[65vh] w-full rounded-md border border-line" />
         )}

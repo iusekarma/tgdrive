@@ -151,6 +151,20 @@ class QueueLeave(BaseModel):
     client: ClientId
 
 
+class FileInfo(BaseModel):
+    """Details a browser read from a file it had in hand: while uploading it,
+    or while showing it. Only what is sent is changed. `modified` is the
+    file's own last-modified time and `taken` (EXIF, camera-local, no time
+    zone) is "YYYY-MM-DD HH:MM:SS"."""
+    model_config = {"extra": "forbid"}
+    width: int | None = Field(None, ge=1, le=1_000_000)
+    height: int | None = Field(None, ge=1, le=1_000_000)
+    duration: float | None = Field(None, ge=0, le=10_000_000)
+    modified: int | None = Field(None, ge=0, le=100_000_000_000)
+    taken: str | None = Field(None, pattern=r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
+    camera: str | None = Field(None, max_length=200)
+
+
 class NodesMove(BaseModel):
     ids: NodeIds
     parent_id: str | None = None
@@ -637,6 +651,20 @@ async def get_thumbnail(node_id: str, drive: Drive = Depends(unlocked_drive), st
         "X-Content-Type-Options": "nosniff",
         "Cache-Control": "private, no-store",
     })
+
+
+@router.get("/drives/{name}/files/{node_id}/info")
+async def get_file_info(node_id: str, drive: Drive = Depends(unlocked_drive), store: Storage = Depends(get_store)):
+    """Details known about the file; any field may be missing. Never fetches
+    the file itself."""
+    return store.info(drive, node_id)
+
+
+@router.put("/drives/{name}/files/{node_id}/info")
+async def put_file_info(node_id: str, body: FileInfo, drive: Drive = Depends(unlocked_drive),
+                        store: Storage = Depends(get_store)):
+    """Merges the fields sent into the file's details and returns them all."""
+    return store.set_info(drive, node_id, body.model_dump(exclude_none=True))
 
 
 @router.put("/drives/{name}/files/{node_id}/thumbnail", status_code=204)

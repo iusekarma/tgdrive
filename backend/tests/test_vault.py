@@ -251,6 +251,27 @@ class ThumbnailTest(Base):
         await s.delete(d, nid)
         self.assertEqual(os.listdir(self.thumb_dir), [])
 
+    def test_describe_reads_size_and_exif(self):
+        im = Image.new("RGB", (400, 300))
+        exif = Image.Exif()
+        exif[0x0112] = 6                                  # rotated a quarter turn
+        exif[0x010F], exif[0x0110] = "Canon", "Canon EOS R5"
+        exif.get_ifd(0x8769)[0x9003] = "2024:05:01 12:30:00"
+        buf = BytesIO()
+        im.save(buf, "JPEG", exif=exif)
+        self.assertEqual(thumbs.describe(buf.getvalue()), {
+            "width": 300, "height": 400, "taken": "2024-05-01 12:30:00", "camera": "Canon EOS R5"})
+        self.assertEqual(thumbs.describe(b"<svg/>"), {})
+
+    async def test_details_are_merged_encrypted_and_filled_by_thumbnailing(self):
+        s, d = self.store, self.drive
+        nid = await s.upload(d, None, "photo.png", gen(image_bytes()))
+        self.assertEqual(s.info(d, nid), {})
+        self.assertEqual(s.set_info(d, nid, {"modified": 1700000000}), {"modified": 1700000000})
+        self.assertNotIn(b"modified", s.conn.execute("SELECT info_enc FROM nodes WHERE id = ?", (nid,)).fetchone()[0])
+        await s.thumbnail(d, nid)
+        self.assertEqual(s.info(d, nid), {"modified": 1700000000, "width": 1200, "height": 800})
+
     async def test_uploaded_thumbnail_for_a_video(self):
         s, d = self.store, self.drive
         nid = await s.upload(d, None, "clip.mp4", gen(os.urandom(3000)))

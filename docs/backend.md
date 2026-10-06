@@ -215,6 +215,18 @@ on failure.
 | `thumbnail(drive, id)` | Returns the decrypted WebP. If there is none and the file is an image of a known type up to 50 MB, downloads it once and makes one. A per-node lock stops two requests making the same thumbnail; failures are remembered in `_thumb_failed` |
 | `sweep_thumbnails()` | At startup: deletes thumbnails whose node no longer exists (after a restore) and leftover `.tmp` files |
 
+### File details
+
+| Method | Does |
+|---|---|
+| `info(drive, id)` | The file's details (`width`, `height`, `duration`, `modified`, `taken`, `camera`; any may be missing), decrypted from `nodes.info_enc` |
+| `set_info(drive, id, fields)` | Merges `fields` in, seals the JSON with the file key (AAD `tgdrive/info\|<id>`) and saves it |
+
+Details are never worth fetching a file from Telegram for. Browsers send
+them from the local copy after an upload and from previews they are already
+showing (`PUT /files/{id}/info`); `thumbnail()`, which has the whole image
+in hand anyway, adds an image's own with `thumbs.describe`.
+
 Thumbnails are kept on local disk rather than in Telegram because one extra
 channel message per file would halve upload speed under Telegram's per-chat
 rate limit.
@@ -374,6 +386,10 @@ folder and node changes, completed uploads.
 Any failure raises `BadImage`. `can_generate(name, size)` says whether the
 server will make one itself (known image extension, at most 50 MB).
 `UPLOAD_MAX` caps browser-sent thumbnails at 4 MB.
+
+`describe(data)` reads an image's headers only: its shown width and height
+(EXIF rotation applied), and the EXIF date taken and camera, if present.
+It returns `{}` for anything that isn't a readable image.
 
 ---
 

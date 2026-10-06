@@ -303,6 +303,18 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(c.get(url).status_code, 200)
         self.assertEqual(c.put(url, content=b"x" * (4 * 1024 * 1024 + 1)).status_code, 413)
 
+    def test_file_info(self):
+        c = self.c
+        f = c.put("/api/drives/main/files", params={"filename": "v.mp4"}, content=b"\0" * 100).json()
+        url = f"/api/drives/main/files/{f['id']}/info"
+        self.assertEqual(c.get(url).json(), {})
+        self.assertEqual(c.put(url, json={"width": 1920, "height": 1080}).json(), {"width": 1920, "height": 1080})
+        self.assertEqual(c.put(url, json={"duration": 12.5}).json(), {"width": 1920, "height": 1080, "duration": 12.5})
+        self.assertEqual(c.put(url, json={"secret": 1}).status_code, 422)
+        self.assertEqual(c.put(url, json={"taken": "yesterday"}).status_code, 422)
+        folder = c.post("/api/drives/main/folders", json={"name": "F"}).json()["id"]
+        self.assertEqual(c.get(f"/api/drives/main/files/{folder}/info").status_code, 400)
+
     def test_search(self):
         c = self.c
         folder = c.post("/api/drives/main/folders", json={"name": "Trips"}).json()["id"]

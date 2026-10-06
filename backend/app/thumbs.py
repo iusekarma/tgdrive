@@ -45,3 +45,35 @@ def make(data: bytes) -> bytes:
         raise
     except (UnidentifiedImageError, Image.DecompressionBombError, OSError, ValueError, SyntaxError):
         raise BadImage("not a readable image") from None
+
+
+def _exif_text(value) -> str | None:
+    if isinstance(value, bytes):
+        value = value.decode("ascii", "ignore")
+    text = str(value).strip("\0 ") if value is not None else ""
+    return text or None
+
+
+def describe(data: bytes) -> dict:
+    """Width and height as shown (EXIF rotation applied), and when and with
+    what a photo was taken, if the file says. Reads headers only; {} for
+    anything that isn't a readable image."""
+    try:
+        with Image.open(BytesIO(data)) as im:
+            if im.format not in FORMATS:
+                return {}
+            width, height = im.size
+            exif = im.getexif()
+    except (UnidentifiedImageError, Image.DecompressionBombError, OSError, ValueError, SyntaxError):
+        return {}
+    if exif.get(0x0112) in (5, 6, 7, 8):         # Orientation: rotated a quarter turn
+        width, height = height, width
+    info: dict = {"width": width, "height": height}
+    taken = _exif_text(exif.get_ifd(0x8769).get(0x9003)) or _exif_text(exif.get(0x0132))
+    if taken and len(taken) >= 19:              # "YYYY:MM:DD HH:MM:SS", camera-local time
+        info["taken"] = f"{taken[:10].replace(':', '-')} {taken[11:19]}"
+    make, model = _exif_text(exif.get(0x010F)), _exif_text(exif.get(0x0110))
+    camera = model if make and model and model.startswith(make.split()[0]) else " ".join(filter(None, (make, model)))
+    if camera:
+        info["camera"] = camera[:200]
+    return info

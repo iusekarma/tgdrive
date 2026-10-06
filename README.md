@@ -395,6 +395,7 @@ Interactive docs are served at **http://localhost:8000/api/docs**.
 | POST | `/api/uploads/leave` | A closing tab leaves the upload line |
 | GET | `/api/drives/{name}/files/{id}` | Download; supports `Range` and `?inline=true` |
 | GET · PUT | `/api/drives/{name}/files/{id}/thumbnail` | Get or upload a 320px WebP thumbnail |
+| GET · PUT | `/api/drives/{name}/files/{id}/info` | Get or merge a file's details (dimensions, length, dates, camera) |
 
 Drive routes answer 401 with `"locked": "vault"` or `"locked": "drive"` to
 say which password is needed.
