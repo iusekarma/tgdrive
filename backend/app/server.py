@@ -104,9 +104,13 @@ class NodeUpdate(BaseModel):
 
 
 class UploadStart(BaseModel):
+    """`modified` is the file's last-modified time (any unit, as long as it is
+    the same each time). With it, an unfinished upload of the same file is
+    resumed instead of refused."""
     filename: str
     parent_id: str | None = None
     size: int = Field(ge=0)
+    modified: int | None = None
 
 
 class NodesMove(BaseModel):
@@ -465,9 +469,33 @@ async def start_upload(body: UploadStart, drive: Drive = Depends(unlocked_drive)
                        store: Storage = Depends(get_store)):
     """Starts a resumable upload and reserves its name. Send the file with
     PUT .../uploads/{id}; if that is cut off, ask GET .../uploads/{id} how
-    much is stored and send the rest from there."""
-    node_id = store.start_upload(drive, body.parent_id, body.filename, body.size)
-    return {"id": node_id, "chunk_size": store.chunk_size}
+    much is stored and send the rest from there. `stored` is more than 0 when
+    an unfinished upload of the same file was picked up again."""
+    node_id = None
+    if body.modified is not None:
+        node_id = store.find_upload(drive, body.parent_id, body.filename, body.size, body.modified)
+    if node_id is None:
+        node_id = store.start_upload(drive, body.parent_id, body.filename, body.size, body.modified)
+    return {"id": node_id, "chunk_size": store.chunk_size, "stored": store.upload_state(drive, node_id).stored}
+
+
+@router.get("/drives/{name}/uploads")
+async def list_uploads(drive: Drive = Depends(unlocked_drive), store: Storage = Depends(get_store)):
+    """Unfinished uploads, such as those left by a closed tab. Each holds its
+    name until resumed (by starting the same file again), cancelled, or idle
+    for an hour. `active` means a request is sending to it right now."""
+    return [
+        {
+            "id": node_id,
+            "name": name,
+            "path": [{"id": c.id, "name": c.name} for c in path],
+            "size": state.size,
+            "stored": state.stored,
+            "modified": state.modified,
+            "active": state.lock.locked(),
+        }
+        for node_id, name, path, state in store.unfinished_uploads(drive)
+    ]
 
 
 @router.get("/drives/{name}/uploads/{node_id}")

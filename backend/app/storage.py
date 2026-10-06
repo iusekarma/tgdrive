@@ -83,6 +83,7 @@ class UploadState:
            'waiting'   the transport is waiting to retry (see `wait`)"""
     size: int
     chunks: int            # how many the finished file has
+    modified: int | None = None   # the client's last-modified time, to know the file again
     stored: int = 0        # bytes safely in the transport; resume from here
     next_idx: int = 0
     phase: str = "idle"
@@ -537,7 +538,8 @@ class Storage:
     # connection (or got a 503 when Telegram gave up) sends the rest again
     # from upload_state().stored. At most one chunk is ever sent twice.
 
-    def start_upload(self, drive: Drive, parent_id: str | None, name: str, size: int) -> str:
+    def start_upload(self, drive: Drive, parent_id: str | None, name: str, size: int,
+                     modified: int | None = None) -> str:
         if size < 0:
             raise StorageError("invalid size")
         self._check_target(drive, parent_id, name)
@@ -550,8 +552,38 @@ class Storage:
                 (node_id, drive.id, parent_id, drive.keys.encrypt_name(node_id, name),
                  wrapped, self.chunk_size, int(time.time())),
             )
-        self._uploads[node_id] = UploadState(size, max(1, -(-size // self.chunk_size)))
+        self._uploads[node_id] = UploadState(size, max(1, -(-size // self.chunk_size)), modified)
         return node_id
+
+    def find_upload(self, drive: Drive, parent_id: str | None, name: str, size: int,
+                    modified: int) -> str | None:
+        """An unfinished upload of the same file (name, size and last-modified
+        time) to the same folder, for the client to resume instead of starting
+        again."""
+        rows = self.conn.execute(
+            "SELECT id, name_enc FROM nodes WHERE drive_id = ? AND parent_id IS ? AND state = 'uploading'",
+            (drive.id, parent_id))
+        for r in rows:
+            state = self._uploads.get(r["id"])
+            if (state is not None and not state.gone and state.size == size and state.modified == modified
+                    and drive.keys.decrypt_name(r["id"], r["name_enc"]) == name):
+                return r["id"]
+        return None
+
+    def unfinished_uploads(self, drive: Drive) -> list[tuple[str, str, list[Entry], UploadState]]:
+        """Every upload in the drive not yet complete, oldest first, as
+        (id, name, folders above it, state)."""
+        rows = self.conn.execute(
+            "SELECT id, parent_id, name_enc FROM nodes WHERE drive_id = ? AND state = 'uploading' "
+            "ORDER BY created_at", (drive.id,)).fetchall()
+        found = []
+        for r in rows:
+            state = self._uploads.get(r["id"])
+            if state is None or state.gone:
+                continue   # a single-request upload, or one being purged
+            found.append((r["id"], drive.keys.decrypt_name(r["id"], r["name_enc"]),
+                          self.path(drive, r["parent_id"]), state))
+        return found
 
     def upload_state(self, drive: Drive, node_id: str) -> UploadState:
         state = self._uploads.get(node_id)

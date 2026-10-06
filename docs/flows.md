@@ -101,7 +101,7 @@ sequenceDiagram
     UI->>API: POST /uploads {filename, parent_id, size: 40 MiB}
     API->>St: start_upload()
     St->>St: check name is free<br/>new file key (wrapped)<br/>INSERT node state='uploading'<br/>UploadState(chunks=3) in memory
-    API-->>UI: {id, chunk_size}
+    API-->>UI: {id, chunk_size, stored: 0}
 
     UI->>API: PUT /uploads/{id}?offset=0 (body: whole file, XHR)
     par client keeps sending
@@ -150,6 +150,8 @@ What happens in other cases:
 | Upload idle for an hour, or server restarted | 404 on status | Starts that file again from 0 |
 | User cancels | — | Aborts XHR, `DELETE /uploads/{id}`; server purges stored chunks |
 | More than 8 tries in a row without progress | — | Shows the error with Retry and Discard |
+| Tab closed or reloaded mid-upload | `GET /uploads` lists it when the drive is next opened | Shows it as unfinished: choose the file again to resume, or discard it |
+| The same file is uploaded again into the same folder | `POST /uploads` returns the unfinished upload's id and `stored` | Resumes from `stored` instead of failing with "already exists" |
 
 ## Telegram rate limits during an upload
 

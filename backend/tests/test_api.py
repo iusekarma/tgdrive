@@ -187,6 +187,32 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(c.delete(f"/api/drives/main/uploads/{nid}").status_code, 204)
         self.assertEqual(c.get(f"/api/drives/main/uploads/{nid}").status_code, 404)
 
+    def test_unfinished_upload_is_listed_and_resumed(self):
+        c = self.c
+        data = os.urandom(1024 * 2 + 5)
+        folder = c.post("/api/drives/main/folders", json={"name": "docs"}).json()
+        start = {"filename": "a.bin", "parent_id": folder["id"], "size": len(data), "modified": 1700}
+        r = c.post("/api/drives/main/uploads", json=start)
+        self.assertEqual(r.json()["stored"], 0)
+        nid = r.json()["id"]
+        c.put(f"/api/drives/main/uploads/{nid}", content=data[:1500])   # the tab closes
+
+        listed = c.get("/api/drives/main/uploads").json()
+        self.assertEqual(listed, [{"id": nid, "name": "a.bin", "path": [{"id": folder["id"], "name": "docs"}],
+                                   "size": len(data), "stored": 1024, "modified": 1700, "active": False}])
+
+        # Not the same file: a different size or time is still a name clash.
+        for change in ({"size": len(data) + 1}, {"modified": 1701}, {"modified": None}):
+            self.assertEqual(c.post("/api/drives/main/uploads", json={**start, **change}).status_code, 409)
+
+        # The same file again picks up where it stopped.
+        r = c.post("/api/drives/main/uploads", json=start)
+        self.assertEqual((r.status_code, r.json()["id"], r.json()["stored"]), (201, nid, 1024))
+        r = c.put(f"/api/drives/main/uploads/{nid}", params={"offset": 1024}, content=data[1024:])
+        self.assertEqual(r.status_code, 201, r.text)
+        self.assertEqual(c.get(f"/api/drives/main/files/{nid}").content, data)
+        self.assertEqual(c.get("/api/drives/main/uploads").json(), [])
+
     def test_create_folder_exist_ok(self):
         c = self.c
         first = c.post("/api/drives/main/folders", json={"name": "docs"}).json()

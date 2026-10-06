@@ -30,6 +30,16 @@ export type UploadStatus =
       wait: UploadWait | null;
     }
   | { done: true; entry: Entry };
+/** An upload left unfinished, e.g. by a closed tab. `path` is the folders it goes in. */
+export type UnfinishedUpload = {
+  id: string;
+  name: string;
+  path: Crumb[];
+  size: number;
+  stored: number;
+  modified: number | null;
+  active: boolean;
+};
 
 /** status 0 = server unreachable, -1 = cancelled by the user.
  * `locked` says what a 401 wants: the master password or a drive's own. */
@@ -141,12 +151,15 @@ export const api = {
     request<Entry>("PATCH", `${drivePath(drive)}/nodes/${id}`, { parent_id: parent }),
   moveMany: (drive: string, ids: string[], parent: string | null) =>
     request<void>("POST", `${drivePath(drive)}/nodes/move`, { ids, parent_id: parent }),
-  startUpload: (drive: string, parent: string | null, filename: string, size: number) =>
-    request<{ id: string; chunk_size: number }>("POST", `${drivePath(drive)}/uploads`, {
+  /** With `modified`, an unfinished upload of the same file is picked up again; `stored` says from where. */
+  startUpload: (drive: string, parent: string | null, filename: string, size: number, modified: number) =>
+    request<{ id: string; chunk_size: number; stored: number }>("POST", `${drivePath(drive)}/uploads`, {
       filename,
       parent_id: parent,
       size,
+      modified,
     }),
+  unfinishedUploads: (drive: string) => request<UnfinishedUpload[]>("GET", `${drivePath(drive)}/uploads`),
   uploadStatus: (drive: string, id: string) => request<UploadStatus>("GET", `${drivePath(drive)}/uploads/${id}`),
   cancelUpload: (drive: string, id: string) => request<void>("DELETE", `${drivePath(drive)}/uploads/${id}`),
   removeMany: (drive: string, ids: string[]) => request<void>("POST", `${drivePath(drive)}/nodes/delete`, { ids }),

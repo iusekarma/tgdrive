@@ -212,6 +212,13 @@ export default function BrowserPage() {
     }
   }, [driveLocked, settled, drive, location.pathname, navigate]);
 
+  // Uploads left unfinished (a closed tab, a reload) show up once the drive opens, to resume or discard.
+  const opened = listing.isSuccess;
+  const { adopt } = uploads;
+  useEffect(() => {
+    if (opened) adopt(drive);
+  }, [opened, drive, adopt]);
+
   // Navigation is a transition: dropping the old name's cache any sooner would refetch it under that name.
   const renamedFrom = useRef<string | null>(null);
   useEffect(() => {

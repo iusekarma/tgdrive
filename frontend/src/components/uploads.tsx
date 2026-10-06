@@ -1,5 +1,5 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { Check, CircleAlert, RotateCw, WifiOff, X } from "lucide-react";
+import { Check, CircleAlert, CirclePause, RotateCw, Upload, WifiOff, X } from "lucide-react";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { api, ApiError, sendUpload, type Entry, type UploadStatus, type UploadWait } from "../api";
@@ -7,7 +7,17 @@ import { formatDuration, formatSize } from "../format";
 import { sendThumbnail } from "../thumbs";
 import { ICON_BUTTON } from "./ui";
 
-type Status = "queued" | "uploading" | "finishing" | "retrying" | "offline" | "done" | "error" | "cancelled";
+/** "interrupted": left unfinished on the server (e.g. by a closed tab) until its file is chosen again. */
+type Status =
+  | "queued"
+  | "uploading"
+  | "finishing"
+  | "retrying"
+  | "offline"
+  | "done"
+  | "error"
+  | "cancelled"
+  | "interrupted";
 
 type Item = {
   id: number;
@@ -16,7 +26,9 @@ type Item = {
   /** Bytes the browser has sent, and how many of those are safe in Telegram. */
   sent: number;
   stored: number;
-  /** Bytes a second over the last few seconds (the average, once done); null until known. */
+  /** Bytes this session has moved for it, for the overall speed. */
+  moved: number;
+  /** Average bytes a second since it started (or was last retried); null until known. */
   speed: number | null;
   status: Status;
   /** While "retrying": what went wrong, and when (ms since epoch) the next try is. */
@@ -42,13 +54,29 @@ type Job = {
   file: File | null;
   upload?: string;
   stored: number;
-  started?: number;
+  /** What the server already had when this session first sent to it. */
+  base?: number;
+  /** When this run started and from which byte, for its average speed. */
+  run?: { at: number; from: number };
+};
+
+/** An upload the server has but this tab has no file for. */
+type Leftover = {
+  drive: string;
+  upload: string;
+  parent: string | null;
+  name: string;
+  size: number;
+  stored: number;
+  modified: number | null;
 };
 
 type Uploads = {
   enqueue: (drive: string, parent: string | null, files: Picked[], emptyFolders?: string[][]) => void;
   /** Points queued uploads at a drive's new name. */
   renameDrive: (from: string, to: string) => void;
+  /** Shows the drive's unfinished uploads that this tab isn't already sending. */
+  adopt: (drive: string) => void;
 };
 
 const Context = createContext<Uploads | null>(null);
@@ -63,20 +91,12 @@ const ACTIVE: Status[] = ["queued", "uploading", "finishing", "retrying", "offli
 /** Tries in a row without getting any further before giving up (about 3 minutes of backing off). */
 const MAX_RETRIES = 8;
 const POLL_MS = 1000;
-/** Sending is measured often and smoothly. Storing moves a whole chunk (16 MB) at a time, so it needs a longer look. */
-const SENT_WINDOW_MS = 5000;
-const STORED_WINDOW_MS = 20000;
 
-/** Bytes a second over the last `windowMs`, fed a running total; null until a second has passed. */
-function rate(start: number, windowMs: number): (total: number) => number | null {
-  const samples: [number, number][] = [[Date.now(), start]];
-  return (total) => {
-    const now = Date.now();
-    samples.push([now, total]);
-    while (samples.length > 2 && now - samples[0][0] > windowMs) samples.shift();
-    const [t0, b0] = samples[0];
-    return now - t0 >= 1000 ? ((total - b0) * 1000) / (now - t0) : null;
-  };
+/** Bytes a second since the run started; null for the first second. */
+function average(run: { at: number; from: number } | undefined, bytes: number): number | null {
+  if (!run) return null;
+  const ms = Date.now() - run.at;
+  return ms >= 1000 ? ((bytes - run.from) * 1000) / ms : null;
 }
 
 const cancelled = () => new ApiError(-1, "Upload cancelled.");
@@ -191,14 +211,27 @@ export function readDropped(data: DataTransfer): Promise<{ files: Picked[]; fold
 export function UploadsProvider({ children }: { children: ReactNode }) {
   const queryClient = useQueryClient();
   const [items, setItems] = useState<Item[]>([]);
+  // Time spent with something to upload, for the overall average speed.
+  const [clock, setClock] = useState<{ spent: number; since: number | null }>({ spent: 0, since: null });
   const queue = useRef<Job[]>([]);
   const current = useRef<{ job: Job; abort: () => void } | null>(null);
   /** Uploads that gave up, kept so they can resume from where they stopped. */
   const failed = useRef(new Map<number, Job>());
+  /** Unfinished uploads found on the server, waiting for their file to be chosen again. */
+  const leftovers = useRef(new Map<number, Leftover>());
   const nextId = useRef(1);
 
   const patch = useCallback((id: number, change: Partial<Item>) => {
     setItems((list) => list.map((item) => (item.id === id ? { ...item, ...change } : item)));
+  }, []);
+
+  /** The same file was started again and the server resumed it: its own row takes over. */
+  const claim = useCallback((upload: string) => {
+    for (const [id, left] of leftovers.current) {
+      if (left.upload !== upload) continue;
+      leftovers.current.delete(id);
+      setItems((list) => list.filter((item) => item.id !== id));
+    }
   }, []);
 
   /** One attempt: sends the file from `offset`, watching the server while it does. */
@@ -208,23 +241,19 @@ export function UploadsProvider({ children }: { children: ReactNode }) {
       let sent = offset;
       let over = false;
       let lastPatch = 0;
-      const sentRate = rate(offset, SENT_WINDOW_MS);
-      const storedRate = rate(offset, STORED_WINDOW_MS);
-      // Once everything is sent, what is left is the server storing it in Telegram.
-      const speed = () => {
-        const sending = sentRate(sent);
-        const storing = storedRate(job.stored);
-        return sent >= file.size ? storing : sending;
+      const progress = () => {
+        const bytes = Math.max(sent, job.stored);
+        return { moved: Math.max(0, bytes - (job.base ?? 0)), speed: average(job.run, bytes) };
       };
 
       job.stored = offset;
-      patch(id, { status: "uploading", sent, stored: offset, speed: null, note: undefined, until: undefined });
+      patch(id, { status: "uploading", sent, stored: offset, note: undefined, until: undefined, ...progress() });
       const xhr = sendUpload(batch.drive, upload, offset, file.slice(offset), (loaded) => {
         sent = offset + loaded;
         const now = Date.now();
         if (now - lastPatch < 250 && sent < file.size) return;
         lastPatch = now;
-        patch(id, { sent, speed: speed(), status: sent >= file.size ? "finishing" : "uploading" });
+        patch(id, { sent, status: sent >= file.size ? "finishing" : "uploading", ...progress() });
       });
       // The browser only knows what it has sent; the server knows what is safe in
       // Telegram, and whether it is waiting out a Telegram hiccup.
@@ -235,8 +264,8 @@ export function UploadsProvider({ children }: { children: ReactNode }) {
             job.stored = Math.max(job.stored, status.stored);
             patch(id, {
               stored: job.stored,
-              speed: speed(),
               wait: status.wait ? { ...status.wait, until: Date.now() + status.wait.retry_in * 1000 } : undefined,
+              ...progress(),
             });
           },
           () => undefined,
@@ -265,15 +294,19 @@ export function UploadsProvider({ children }: { children: ReactNode }) {
         try {
           const parent = await folderFor(batch, job.dirs);
           if (!file) return null;
-          job.started ??= Date.now();
           let offset = 0;
           if (job.upload) {
             const status = await api.uploadStatus(batch.drive, job.upload);
             if (status.done) return status.entry;
             offset = status.stored;
           } else {
-            job.upload = (await api.startUpload(batch.drive, parent, file.name, file.size)).id;
+            const started = await api.startUpload(batch.drive, parent, file.name, file.size, file.lastModified);
+            job.upload = started.id;
+            offset = started.stored;
+            if (offset > 0) claim(started.id);
           }
+          job.base ??= offset;
+          job.run ??= { at: Date.now(), from: offset };
           if (signal.aborted) throw cancelled();
           const result = await send(job, file, job.upload, offset, signal);
           if (result.done) return result.entry;
@@ -286,6 +319,7 @@ export function UploadsProvider({ children }: { children: ReactNode }) {
             // Expired after an hour untouched, or the server restarted.
             job.upload = undefined;
             job.stored = 0;
+            job.base = job.run = undefined;
             why = "The server no longer has the part already sent, so it starts again.";
           } else if (retryable(e) || (e.status === 409 && job.upload)) {
             why = whatWentWrong(e);
@@ -300,17 +334,17 @@ export function UploadsProvider({ children }: { children: ReactNode }) {
           if (failures > MAX_RETRIES) throw e;
           if (!navigator.onLine) {
             failures -= 1; // waiting for the network doesn't use up tries
-            patch(id, { status: "offline", speed: null });
+            patch(id, { status: "offline" });
             await untilOnline(signal);
             continue;
           }
           const delay = Math.min(30_000, 1000 * 2 ** failures);
-          patch(id, { status: "retrying", note: why, until: Date.now() + delay, speed: null });
+          patch(id, { status: "retrying", note: why, until: Date.now() + delay });
           await sleep(delay, signal);
         }
       }
     },
-    [patch, send],
+    [claim, patch, send],
   );
 
   // One file at a time: Telegram rate-limits bots, and parallel uploads only trade speed for retries.
@@ -330,12 +364,12 @@ export function UploadsProvider({ children }: { children: ReactNode }) {
             setItems((list) => list.filter((item) => item.id !== id)); // an empty folder that needed a retry
             return;
           }
-          const seconds = (Date.now() - (job.started ?? Date.now())) / 1000;
           patch(id, {
             status: "done",
             sent: file.size,
             stored: file.size,
-            speed: seconds >= 1 ? file.size / seconds : null,
+            moved: file.size - (job.base ?? 0),
+            speed: average(job.run, file.size),
           });
           // Made from the local copy, alongside the next upload rather than before it.
           void sendThumbnail(batch.drive, entry.id, file).then((sent) => {
@@ -354,7 +388,7 @@ export function UploadsProvider({ children }: { children: ReactNode }) {
           if (!file) {
             // Empty folders have no row of their own until something goes wrong.
             const name = dirs.join("/");
-            const row: Item = { id, name, size: 0, sent: 0, stored: 0, speed: null, status: "error", error };
+            const row: Item = { id, name, size: 0, sent: 0, stored: 0, moved: 0, speed: null, status: "error", error };
             setItems((list) => (list.some((item) => item.id === id) ? list : [...list, row]));
             patch(id, { status: "error", error });
           } else patch(id, { status: "error", error, ...quiet });
@@ -382,6 +416,7 @@ export function UploadsProvider({ children }: { children: ReactNode }) {
           size: file.size,
           sent: 0,
           stored: 0,
+          moved: 0,
           speed: null,
           status: "queued",
         });
@@ -396,6 +431,46 @@ export function UploadsProvider({ children }: { children: ReactNode }) {
     const jobs = [...queue.current, ...failed.current.values()];
     if (current.current) jobs.push(current.current.job);
     for (const { batch } of jobs) if (batch.drive === from) batch.drive = to;
+    for (const left of leftovers.current.values()) if (left.drive === from) left.drive = to;
+  }, []);
+
+  const adopt = useCallback((drive: string) => {
+    void api.unfinishedUploads(drive).then(
+      (found) => {
+        // Read once the answer is in, so an upload started meanwhile isn't shown twice.
+        const known = new Set<string>();
+        const jobs = [...queue.current, ...failed.current.values()];
+        if (current.current) jobs.push(current.current.job);
+        for (const job of jobs) if (job.upload) known.add(job.upload);
+        for (const left of leftovers.current.values()) known.add(left.upload);
+        const added: Item[] = [];
+        for (const u of found) {
+          if (u.active || known.has(u.id)) continue; // being sent, by this tab or another
+          const id = nextId.current++;
+          leftovers.current.set(id, {
+            drive,
+            upload: u.id,
+            parent: u.path.length > 0 ? u.path[u.path.length - 1].id : null,
+            name: u.name,
+            size: u.size,
+            stored: u.stored,
+            modified: u.modified,
+          });
+          added.push({
+            id,
+            name: [...u.path.map((c) => c.name), u.name].join("/"),
+            size: u.size,
+            sent: u.stored,
+            stored: u.stored,
+            moved: 0,
+            speed: null,
+            status: "interrupted",
+          });
+        }
+        if (added.length > 0) setItems((list) => [...list, ...added]);
+      },
+      () => undefined,
+    );
   }, []);
 
   function cancel(id: number) {
@@ -403,42 +478,81 @@ export function UploadsProvider({ children }: { children: ReactNode }) {
       current.current.abort();
       return;
     }
-    queue.current = queue.current.filter((job) => job.id !== id);
+    const job = queue.current.find((j) => j.id === id);
+    queue.current = queue.current.filter((j) => j.id !== id);
+    // A queued retry or resumed upload already holds a place on the server.
+    if (job?.upload) void api.cancelUpload(job.batch.drive, job.upload).catch(() => undefined);
     patch(id, { status: "cancelled" });
+  }
+
+  function cancelAll() {
+    for (const job of [...queue.current]) cancel(job.id);
+    if (current.current) cancel(current.current.job.id);
   }
 
   function retry(id: number) {
     const job = failed.current.get(id);
     if (!job) return;
     failed.current.delete(id);
+    job.run = undefined; // its average starts over, without the time it sat failed
     queue.current.push(job);
-    patch(id, { status: "queued", error: undefined });
+    patch(id, { status: "queued", error: undefined, speed: null });
     pump();
   }
 
-  /** A failed upload still holds its name on the server until discarded. */
+  /** Picks up a leftover with its file, chosen again. Returns why not, if it isn't the same file. */
+  function resume(id: number, file: File): string | null {
+    const left = leftovers.current.get(id);
+    if (!left) return null;
+    if (file.name !== left.name || file.size !== left.size) {
+      return `That's not the same file. Choose ${left.name} (${formatSize(left.size)}).`;
+    }
+    if (left.modified !== null && file.lastModified !== left.modified) {
+      return "That file has changed since the upload started. Discard this one and upload it again.";
+    }
+    leftovers.current.delete(id);
+    const batch: Batch = { drive: left.drive, parent: left.parent, folders: new Map() };
+    queue.current.push({ id, batch, dirs: [], file, upload: left.upload, stored: left.stored });
+    patch(id, { status: "queued", error: undefined });
+    pump();
+    return null;
+  }
+
+  /** A failed or interrupted upload still holds its name on the server until discarded. */
   function discard(id: number) {
     const job = failed.current.get(id);
     failed.current.delete(id);
     if (job?.upload) void api.cancelUpload(job.batch.drive, job.upload).catch(() => undefined);
+    const left = leftovers.current.get(id);
+    leftovers.current.delete(id);
+    if (left) void api.cancelUpload(left.drive, left.upload).catch(() => undefined);
     setItems((list) => list.filter((item) => item.id !== id));
   }
 
   function dismissAll() {
-    for (const id of [...failed.current.keys()]) discard(id);
+    for (const id of [...failed.current.keys(), ...leftovers.current.keys()]) discard(id);
     setItems([]);
+    setClock({ spent: 0, since: null });
   }
 
-  const active = items.filter((item) => ACTIVE.includes(item.status)).length;
+  const busy = items.some((item) => ACTIVE.includes(item.status));
 
   useEffect(() => {
-    if (active === 0) return;
+    const now = Date.now();
+    setClock((c) => {
+      if (busy) return c.since === null ? { ...c, since: now } : c;
+      return c.since === null ? c : { spent: c.spent + now - c.since, since: null };
+    });
+  }, [busy]);
+
+  useEffect(() => {
+    if (!busy) return;
     const warn = (e: BeforeUnloadEvent) => e.preventDefault();
     window.addEventListener("beforeunload", warn);
     return () => window.removeEventListener("beforeunload", warn);
-  }, [active]);
+  }, [busy]);
 
-  const value = useMemo(() => ({ enqueue, renameDrive }), [enqueue, renameDrive]);
+  const value = useMemo(() => ({ enqueue, renameDrive, adopt }), [enqueue, renameDrive, adopt]);
 
   return (
     <Context.Provider value={value}>
@@ -448,16 +562,7 @@ export function UploadsProvider({ children }: { children: ReactNode }) {
           aria-label="Uploads"
           className="fixed inset-x-3 bottom-3 z-30 rounded-xl border border-line bg-surface shadow-xl sm:left-auto sm:right-5 sm:w-96"
         >
-          <div className="flex items-center justify-between border-b border-line px-4 py-2.5">
-            <h2 className="text-sm font-semibold" aria-live="polite">
-              {active > 0 ? `Uploading ${active} ${active === 1 ? "file" : "files"}` : "Uploads finished"}
-            </h2>
-            {active === 0 && (
-              <button type="button" onClick={dismissAll} aria-label="Dismiss uploads" className={ICON_BUTTON}>
-                <X size={16} />
-              </button>
-            )}
-          </div>
+          <Summary items={items} clock={clock} onCancelAll={cancelAll} onDismiss={dismissAll} />
           <ul className="max-h-64 overflow-y-auto">
             {items.map((item) => (
               <UploadRow
@@ -465,6 +570,7 @@ export function UploadsProvider({ children }: { children: ReactNode }) {
                 item={item}
                 onCancel={() => cancel(item.id)}
                 onRetry={() => retry(item.id)}
+                onResume={(file) => resume(item.id, file)}
                 onDiscard={() => discard(item.id)}
               />
             ))}
@@ -472,6 +578,129 @@ export function UploadsProvider({ children }: { children: ReactNode }) {
         </section>
       )}
     </Context.Provider>
+  );
+}
+
+/** The panel's header: how far the whole lot has got, and a way to stop it. */
+function Summary({
+  items,
+  clock,
+  onCancelAll,
+  onDismiss,
+}: {
+  items: Item[];
+  clock: { spent: number; since: number | null };
+  onCancelAll: () => void;
+  onDismiss: () => void;
+}) {
+  const [confirming, setConfirming] = useState(false);
+  const busy = items.some((item) => ACTIVE.includes(item.status));
+  const now = useNow(busy);
+  useEffect(() => {
+    if (!busy) setConfirming(false);
+  }, [busy]);
+
+  // Everything uploaded or still going; not what was cancelled, failed or is waiting for its file.
+  const counted = items.filter((item) => item.status === "done" || ACTIVE.includes(item.status));
+  const total = counted.reduce((sum, item) => sum + item.size, 0);
+  const sent = counted.reduce((sum, item) => sum + (item.status === "done" ? item.size : item.sent), 0);
+  const stored = counted.reduce((sum, item) => sum + (item.status === "done" ? item.size : item.stored), 0);
+  const done = counted.filter((item) => item.status === "done").length;
+  const moved = items.reduce((sum, item) => sum + item.moved, 0);
+  const ms = clock.spent + (clock.since === null ? 0 : now - clock.since);
+  const speed = ms >= 1000 && moved > 0 ? (moved * 1000) / ms : null;
+  const left = speed && busy ? formatDuration((total - stored) / speed) + " left" : null;
+  const percent = (bytes: number) => (total > 0 ? Math.min(100, (bytes / total) * 100) : 100);
+  const waiting = items.filter((item) => item.status === "interrupted").length;
+
+  let title: string;
+  if (busy) title = counted.length > 1 ? `Uploaded ${done} of ${counted.length} files` : "Uploading 1 file";
+  else if (waiting > 0 && counted.length === 0) title = `${waiting} unfinished ${waiting === 1 ? "upload" : "uploads"}`;
+  else title = "Uploads finished";
+
+  return (
+    <div className="border-b border-line px-4 py-2.5">
+      <div className="flex items-center justify-between gap-2">
+        <h2 className="text-sm font-semibold" aria-live="polite">
+          {title}
+        </h2>
+        {busy &&
+          (confirming ? (
+            <div className="flex items-center gap-1 text-xs">
+              <span className="text-muted">Cancel all?</span>
+              <button
+                type="button"
+                onClick={() => {
+                  setConfirming(false);
+                  onCancelAll();
+                }}
+                className="rounded-md px-2 py-1 font-medium text-danger hover:bg-danger/10"
+              >
+                Yes
+              </button>
+              <button
+                type="button"
+                onClick={() => setConfirming(false)}
+                className="rounded-md px-2 py-1 font-medium text-muted hover:bg-ink/5 hover:text-ink"
+              >
+                No
+              </button>
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setConfirming(true)}
+              className="rounded-md px-2 py-1 text-xs font-medium text-muted hover:bg-ink/5 hover:text-ink"
+            >
+              Cancel all
+            </button>
+          ))}
+        {!busy && (
+          <button type="button" onClick={onDismiss} aria-label="Dismiss uploads" className={ICON_BUTTON}>
+            <X size={16} />
+          </button>
+        )}
+      </div>
+      {counted.length > 1 && (
+        <>
+          <p className="text-xs text-muted">
+            {[
+              `${formatSize(stored)} of ${formatSize(total)}`,
+              speed && `${formatSize(speed)}/s${busy ? "" : " on average"}`,
+              left,
+            ]
+              .filter(Boolean)
+              .join(" · ")}
+          </p>
+          {busy && (
+            <Bar
+              sent={percent(sent)}
+              stored={percent(stored)}
+              label="Overall upload progress"
+              text={`${formatSize(stored)} of ${formatSize(total)} stored`}
+            />
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+/** Sent, then the part of it already safe in Telegram. */
+function Bar({ sent, stored, label, text }: { sent: number; stored: number; label: string; text: string }) {
+  return (
+    <div
+      className="relative mt-1.5 h-1 overflow-hidden rounded-full bg-ink/10"
+      role="progressbar"
+      aria-valuenow={Math.round(stored)}
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-valuetext={text}
+      aria-label={label}
+    >
+      <div className="absolute inset-y-0 left-0 rounded-full bg-teal/35" style={{ width: `${sent}%` }} />
+      <div className="absolute inset-y-0 left-0 rounded-full bg-teal" style={{ width: `${stored}%` }} />
+    </div>
   );
 }
 
@@ -498,14 +727,18 @@ function UploadRow({
   item,
   onCancel,
   onRetry,
+  onResume,
   onDiscard,
 }: {
   item: Item;
   onCancel: () => void;
   onRetry: () => void;
+  onResume: (file: File) => string | null;
   onDiscard: () => void;
 }) {
   const now = useNow(item.until !== undefined || item.wait !== undefined);
+  const picker = useRef<HTMLInputElement>(null);
+  const [mismatch, setMismatch] = useState<string | null>(null);
   const secondsTo = (until: number) => Math.max(0, Math.ceil((until - now) / 1000));
   const percent = (bytes: number) => (item.size > 0 ? Math.min(100, (bytes / item.size) * 100) : 100);
   const running = ACTIVE.includes(item.status);
@@ -520,7 +753,7 @@ function UploadRow({
         if (item.wait) return waitText(item.wait, secondsTo(item.wait.until));
         const finishing = item.status === "finishing";
         const done = finishing ? item.stored : item.sent;
-        const left = item.speed ? formatDuration((item.size - done) / item.speed) + " left" : null;
+        const left = item.speed ? formatDuration((item.size - item.stored) / item.speed) + " left" : null;
         const amount = `${formatSize(done)} of ${formatSize(item.size)}`;
         return [finishing ? `Storing in Telegram: ${amount}` : amount, speed, left].filter(Boolean).join(" · ");
       }
@@ -537,11 +770,22 @@ function UploadRow({
         return item.error ?? "Upload failed.";
       case "cancelled":
         return "Cancelled";
+      case "interrupted":
+        return (
+          mismatch ??
+          `Stopped at ${formatSize(item.stored)} of ${formatSize(item.size)}. Choose the file again to resume.`
+        );
     }
   }
 
-  const trouble = item.status === "retrying" || item.status === "offline" || !!item.wait;
-  const showBar = ["uploading", "finishing", "retrying", "offline"].includes(item.status);
+  function picked(files: FileList | null) {
+    const file = files?.[0];
+    if (picker.current) picker.current.value = "";
+    if (file) setMismatch(onResume(file));
+  }
+
+  const trouble = item.status === "retrying" || item.status === "offline" || !!item.wait || !!mismatch;
+  const showBar = ["uploading", "finishing", "retrying", "offline", "interrupted"].includes(item.status);
   return (
     <li className="px-4 py-2.5">
       <div className="flex items-center gap-2">
@@ -568,16 +812,33 @@ function UploadRow({
             >
               <RotateCw size={16} />
             </button>
+          </>
+        )}
+        {item.status === "interrupted" && (
+          <>
+            <CirclePause size={16} className="shrink-0 text-brass" aria-hidden="true" />
+            <input ref={picker} type="file" hidden onChange={(e) => picked(e.target.files)} />
             <button
               type="button"
-              onClick={onDiscard}
-              aria-label={`Discard upload of ${item.name}`}
-              title="Discard"
+              onClick={() => picker.current?.click()}
+              aria-label={`Choose the file to resume ${item.name}`}
+              title="Resume"
               className={ICON_BUTTON}
             >
-              <X size={16} />
+              <Upload size={16} />
             </button>
           </>
+        )}
+        {(item.status === "error" || item.status === "interrupted") && (
+          <button
+            type="button"
+            onClick={onDiscard}
+            aria-label={`Discard upload of ${item.name}`}
+            title="Discard"
+            className={ICON_BUTTON}
+          >
+            <X size={16} />
+          </button>
         )}
         {running && (
           <button type="button" onClick={onCancel} aria-label={`Cancel upload of ${item.name}`} className={ICON_BUTTON}>
@@ -586,26 +847,14 @@ function UploadRow({
         )}
       </div>
       {showBar && (
-        <div
-          className="relative mt-1.5 h-1 overflow-hidden rounded-full bg-ink/10"
-          role="progressbar"
-          aria-valuenow={Math.round(percent(item.stored))}
-          aria-valuemin={0}
-          aria-valuemax={100}
-          aria-valuetext={`${formatSize(item.stored)} of ${formatSize(item.size)} stored`}
-          aria-label={`Upload progress for ${item.name}`}
-        >
-          {/* Sent, then the part of it already safe in Telegram. */}
-          <div
-            className="absolute inset-y-0 left-0 rounded-full bg-teal/35"
-            style={{ width: `${percent(item.sent)}%` }}
-          />
-          <div
-            className="absolute inset-y-0 left-0 rounded-full bg-teal"
-            style={{ width: `${percent(item.stored)}%` }}
-          />
-        </div>
+        <Bar
+          sent={percent(item.sent)}
+          stored={percent(item.stored)}
+          label={`Upload progress for ${item.name}`}
+          text={`${formatSize(item.stored)} of ${formatSize(item.size)} stored`}
+        />
       )}
     </li>
   );
 }
+

@@ -150,8 +150,14 @@ There are two ways in:
 - **`upload(drive, parent, name, source)`**: one shot. Used by
   `PUT /files` and the CLI. If anything fails, the partial file is purged.
 - **Resumable**, used by the web UI:
-  - `start_upload(drive, parent, name, size)` inserts the node in state
-    `uploading` (reserving the name) and an `UploadState` in memory.
+  - `start_upload(drive, parent, name, size, modified)` inserts the node in
+    state `uploading` (reserving the name) and an `UploadState` in memory.
+  - `find_upload(drive, parent, name, size, modified)` finds an unfinished
+    upload of the same file, so `POST /uploads` hands it back (with its
+    `stored`) instead of refusing the name. `modified` is the browser's
+    `File.lastModified`; without it nothing is matched.
+  - `unfinished_uploads(drive)` backs `GET /uploads`, which the UI uses to
+    show uploads a closed tab left behind, to resume or discard.
   - `write_upload(drive, id, offset, source)` accepts the file from any
     `offset` up to `state.stored`. Bytes the server already has are skipped.
     Whole chunks are stored as they fill (`_flush_upload`); a partial chunk
