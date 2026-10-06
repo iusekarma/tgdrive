@@ -119,7 +119,8 @@ Two ordering rules keep the database and the channel consistent:
 
 | State | Lives in | Lost on restart means |
 |---|---|---|
-| Sessions, the unlocked vault key, unlocked drives | `Sessions._sessions` | Everyone logs in again |
+| The session, the unlocked vault key, unlocked drives | `Sessions._session` | Everyone logs in again |
+| The upload line every device shares | `UploadQueue` | Tabs report their uploads again (`resend`) |
 | Resumable upload progress (`UploadState`) | `Storage._uploads` | The `uploading` node is purged; the browser starts that file again |
 | Wrong-password counters | `LoginThrottle._fails` | Counters reset |
 | "Thumbnail could not be made" set | `Storage._thumb_failed` | One more attempt per image |

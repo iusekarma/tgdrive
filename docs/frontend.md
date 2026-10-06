@@ -113,9 +113,20 @@ file or empty folder. All jobs from one drop share a `Batch`, whose
 `folders` map caches the id of each folder created, so a 1,000-file drop
 creates each folder once (`createFolder(..., exist_ok=true)`).
 
-**One file at a time.** `pump()` runs the next job only when none is
-running. Telegram rate-limits bots per chat, so parallel uploads would
-trade speed for retries.
+**One file at a time, across devices.** Telegram rate-limits bots per chat,
+so parallel uploads would trade speed for retries. Every tab reports its
+rows to the server's shared upload line (`POST /uploads/sync`, see
+[uploadqueue.py](backend.md#uploadqueuepy)) once a second while anything is
+going (every 3 s otherwise), sending only rows whose object changed since
+the last sync. The answer carries other tabs' rows, which the panel shows
+in line order with a "Another tab or device" note; they can be cancelled
+from here (the owning tab sees `cancel` and stops) but not retried. `pump()`
+runs the next job only when none is running here and nothing ahead of it
+in the line is still going, so a new upload queues behind whatever another
+device is sending. Enqueuing, retrying and finishing a job sync at once
+rather than waiting for the next tick; closing the tab sends
+`/uploads/leave` with `sendBeacon` so the next device need not wait for the
+server to time this one out.
 
 **Resume and retry.** `run(job)` loops:
 
@@ -150,8 +161,12 @@ down. Trying again in 12 s.").
 **After an upload**, `sendThumbnail()` makes a thumbnail from the local
 copy in the background while the next file starts.
 
-While anything is active, a `beforeunload` handler asks before the tab is
-closed. Failed jobs are kept so **Retry** resumes from where they stopped;
+The chevron in the panel's header folds the list away, leaving the header
+with the overall progress (even for one file) and a count of failed or
+unfinished rows; the choice is remembered in `localStorage`.
+
+While this tab is sending anything, a `beforeunload` handler asks before
+the tab is closed. Failed jobs are kept so **Retry** resumes from where they stopped;
 **Discard** cancels the upload on the server, freeing its name.
 
 ## thumbs.ts

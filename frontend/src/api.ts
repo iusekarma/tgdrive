@@ -41,6 +41,35 @@ export type UnfinishedUpload = {
   active: boolean;
 };
 
+/** One upload in the line every device shares, as the tab sending it reports it.
+ * `key` is "<tab>:<id>"; `cancel` asks the tab that owns it to stop it. */
+export type QueuedUpload = {
+  key: string;
+  client: string;
+  id: number;
+  status: "queued" | "uploading" | "finishing" | "retrying" | "offline" | "done" | "error" | "cancelled";
+  name: string;
+  size: number;
+  sent: number;
+  stored: number;
+  moved: number;
+  speed: number | null;
+  upload?: string | null;
+  note?: string | null;
+  until?: number | null;
+  wait?: (UploadWait & { until: number }) | null;
+  error?: string | null;
+  cancel: boolean;
+};
+/** What changed since `since`; `order` (keys, front of the line first) only if it changed. */
+export type UploadLine = {
+  epoch: string;
+  rev: number;
+  resend: boolean;
+  items: QueuedUpload[];
+  order: string[] | null;
+};
+
 /** status 0 = server unreachable, -1 = cancelled by the user.
  * `locked` says what a 401 wants: the master password or a drive's own. */
 export class ApiError extends Error {
@@ -162,6 +191,18 @@ export const api = {
   unfinishedUploads: (drive: string) => request<UnfinishedUpload[]>("GET", `${drivePath(drive)}/uploads`),
   uploadStatus: (drive: string, id: string) => request<UploadStatus>("GET", `${drivePath(drive)}/uploads/${id}`),
   cancelUpload: (drive: string, id: string) => request<void>("DELETE", `${drivePath(drive)}/uploads/${id}`),
+  /** Reports this tab's changed uploads and gets everyone's; see backend/app/uploadqueue.py. */
+  syncUploads: (body: {
+    client: string;
+    items: object[];
+    removed: number[];
+    cancel: string[];
+    epoch: string | null;
+    since: number;
+  }) => request<UploadLine>("POST", "/uploads/sync", body),
+  /** For a closing tab, so other devices needn't wait for it to time out. */
+  leaveUploads: (client: string) =>
+    navigator.sendBeacon("/api/uploads/leave", new Blob([JSON.stringify({ client })], { type: "application/json" })),
   removeMany: (drive: string, ids: string[]) => request<void>("POST", `${drivePath(drive)}/nodes/delete`, { ids }),
 
   fileUrl: (drive: string, id: string, inline = false) =>

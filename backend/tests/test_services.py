@@ -12,6 +12,7 @@ from app.storage import (Conflict, Gone, NoSnapshot, NotFound, Storage, StorageE
                          restore_database)
 from app.transport.base import Wait, report_wait
 from app.transport.local import LocalTransport
+from app.uploadqueue import UploadQueue
 
 crypto.KDF_PARAMS = {"alg": "argon2id", "t": 1, "m_kib": 64, "p": 1}  # fast, tests only
 CHUNK = 1024
@@ -267,25 +268,28 @@ class SessionsTest(unittest.TestCase):
         self.assertIsNone(s.get(None))
         self.assertIsNone(s.get("bogus"))
 
-    def test_forget_and_drop(self):
-        s = Sessions()
+    def test_every_device_shares_one_session(self):
+        now = [0.0]
+        s = Sessions(idle_seconds=100, clock=lambda: now[0])
         t1, a = s.create()
         t2, b = s.create()
         self.assertNotEqual(t1, t2)
-        a.drives["x"] = b.drives["x"] = object()
-        s.forget_drive("x")
-        self.assertEqual((a.drives, b.drives), ({}, {}))
-        s.drop(t1)
-        self.assertIsNone(s.get(t1))
-        self.assertIsNotNone(s.get(t2))
-
-    def test_rename_drive_in_every_session(self):
-        s = Sessions()
-        _, a = s.create()
-        _, b = s.create()
+        self.assertIs(a, b)
         a.drives["x"] = SimpleNamespace(name="x")
         s.rename_drive("x", "y")
-        self.assertEqual((list(a.drives), b.drives, a.drives["y"].name), (["y"], {}, "y"))
+        self.assertEqual((list(b.drives), b.drives["y"].name), (["y"], "y"))
+        s.forget_drive("y")
+        self.assertEqual(b.drives, {})
+        now[0] = 50
+        self.assertIs(s.get(t1), a)        # either device keeps it alive
+        now[0] = 140
+        self.assertIs(s.get(t2), a)
+        s.end()
+        self.assertIsNone(s.get(t1))
+        self.assertIsNone(s.get(t2))
+        t3, c = s.create()
+        self.assertIsNot(c, a)
+        self.assertIsNone(s.get(t1))       # old tokens don't come back
 
     def test_throttle(self):
         now = [0.0]
@@ -378,3 +382,51 @@ class BackupSchedulerTest(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UploadQueueTest(unittest.TestCase):
+    def item(self, id, status="queued", **more):
+        return {"id": id, "status": status, "name": f"f{id}", "size": 1, **more}
+
+    def test_order_delta_and_timeout(self):
+        now = [0.0]
+        q = UploadQueue(idle_seconds=60, clock=lambda: now[0])
+        r = q.sync("a", [self.item(1, "uploading"), self.item(2)], [], [], None, 0)
+        self.assertTrue(r["resend"])
+        epoch = r["epoch"]
+        r = q.sync("b", [self.item(1)], [], [], epoch, 0)
+        self.assertEqual(r["order"], ["a:1", "a:2", "b:1"])
+        since = r["rev"]
+
+        # a's first finishes; a retries it later: it goes to the back.
+        r = q.sync("a", [self.item(1, "error")], [], [], epoch, since)
+        self.assertEqual(([i["key"] for i in r["items"]], r["order"]), (["a:1"], None))
+        r = q.sync("a", [self.item(1)], [], [], epoch, r["rev"])
+        self.assertEqual(r["order"], ["a:2", "b:1", "a:1"])
+        self.assertFalse(r["resend"])
+
+        # b cancels a:2; a sees it. Finished items can't be cancelled.
+        r = q.sync("b", [], [], ["a:2", "nope"], epoch, r["rev"])
+        r = q.sync("a", [], [], [], epoch, r["rev"] - 1)
+        self.assertEqual([(i["key"], i["cancel"]) for i in r["items"]], [("a:2", True)])
+
+        # a goes quiet: its items leave the line.
+        now[0] = 30
+        q.sync("b", [], [], [], epoch, 0)
+        now[0] = 70
+        r = q.sync("b", [], [], [], epoch, 0)
+        self.assertEqual(r["order"], ["b:1"])
+
+        # a comes back mid-upload: it is asked to resend, and keeps its turn.
+        r = q.sync("a", [], [], [], epoch, 0)
+        self.assertTrue(r["resend"])
+        r = q.sync("a", [self.item(2, "uploading")], [], [], epoch, 0)
+        self.assertEqual(r["order"], ["a:2", "b:1"])
+        r = q.sync("a", [], [2], [], epoch, 0)
+        self.assertEqual(r["order"], ["b:1"])
+
+    def test_restart_asks_for_everything(self):
+        q = UploadQueue()
+        r = q.sync("a", [self.item(1)], [], [], "old-epoch", 99)
+        self.assertTrue(r["resend"])
+        self.assertEqual([i["key"] for i in r["items"]], ["a:1"])

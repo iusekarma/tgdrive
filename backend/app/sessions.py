@@ -1,5 +1,5 @@
-"""In-memory sessions. The vault key and drive keys live here and nowhere
-else, so a restart locks everything."""
+"""The in-memory session. The vault key and drive keys live here and
+nowhere else, so a restart locks everything."""
 from __future__ import annotations
 
 import secrets
@@ -18,46 +18,51 @@ class Session:
 
 
 class Sessions:
+    """tgdrive has one user, so it has one session. Every device that logs
+    in joins it: each gets a token of its own, but they all see the same
+    vault and unlocked drives, and logging out or idling locks them all."""
+
     def __init__(self, idle_seconds: float = 1800, clock=time.monotonic):
         self.idle_seconds = idle_seconds
         self._clock = clock
-        self._sessions: dict[str, Session] = {}
+        self._session: Session | None = None
+        self._tokens: set[str] = set()
 
     def create(self) -> tuple[str, Session]:
-        self._sweep()
+        """A token for a device that has just proved it knows a password."""
+        session = self._live()
+        if session is None:
+            session = self._session = Session(last_seen=self._clock())
         token = secrets.token_urlsafe(32)
-        session = Session(last_seen=self._clock())
-        self._sessions[token] = session
+        self._tokens.add(token)
         return token, session
 
     def get(self, token: str | None) -> Session | None:
-        session = self._sessions.get(token) if token else None
-        if session is None:
+        if not token or token not in self._tokens:
             return None
-        now = self._clock()
-        if now - session.last_seen > self.idle_seconds:
-            del self._sessions[token]
-            return None
-        session.last_seen = now
+        session = self._live()
+        if session is not None:
+            session.last_seen = self._clock()
         return session
 
-    def drop(self, token: str | None) -> None:
-        self._sessions.pop(token, None)
+    def end(self) -> None:
+        """Logs every device out."""
+        self._session = None
+        self._tokens.clear()
 
     def forget_drive(self, name: str) -> None:
-        for s in self._sessions.values():
-            s.drives.pop(name, None)
+        if self._session:
+            self._session.drives.pop(name, None)
 
     def rename_drive(self, old: str, new: str) -> None:
-        for s in self._sessions.values():
-            if old in s.drives:
-                drive = s.drives[new] = s.drives.pop(old)
-                drive.name = new
+        if self._session and old in self._session.drives:
+            drive = self._session.drives[new] = self._session.drives.pop(old)
+            drive.name = new
 
-    def _sweep(self) -> None:
-        now = self._clock()
-        for token in [t for t, s in self._sessions.items() if now - s.last_seen > self.idle_seconds]:
-            del self._sessions[token]
+    def _live(self) -> Session | None:
+        if self._session is not None and self._clock() - self._session.last_seen > self.idle_seconds:
+            self.end()
+        return self._session
 
 
 class LoginThrottle:

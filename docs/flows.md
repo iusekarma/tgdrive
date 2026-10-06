@@ -83,8 +83,9 @@ sequenceDiagram
     end
 ```
 
-After 30 idle minutes (`TGDRIVE_SESSION_IDLE_MINUTES`) the session is
-forgotten; the next request gets `401 {locked: "vault"}` and the UI returns
+Every device that unlocks joins the same session, so they all see the same
+unlocked drives. After 30 idle minutes (`TGDRIVE_SESSION_IDLE_MINUTES`)
+without a request from any device the session is forgotten; the next request gets `401 {locked: "vault"}` and the UI returns
 to the login screen.
 
 ## Resumable upload

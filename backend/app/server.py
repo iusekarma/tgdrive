@@ -12,7 +12,7 @@ import mimetypes
 import os
 from contextlib import asynccontextmanager
 from dataclasses import asdict
-from typing import Annotated
+from typing import Annotated, Any, Literal
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request, Response
@@ -29,6 +29,7 @@ from .sessions import LoginThrottle, Session, Sessions
 from .storage import (Conflict, Drive, Gone, NoSnapshot, NotFound, NoVault, Storage, StorageError,
                       TransportUnavailable, UploadState, restore_database)
 from .transport import BlobRef
+from .uploadqueue import UploadQueue
 
 log = logging.getLogger("tgdrive")
 
@@ -111,6 +112,43 @@ class UploadStart(BaseModel):
     parent_id: str | None = None
     size: int = Field(ge=0)
     modified: int | None = None
+
+
+class QueueItem(BaseModel):
+    """One upload as a tab shows it. The server only checks what it needs to
+    keep the line in order; the rest is passed on for other devices to show."""
+    id: int
+    status: Literal["queued", "uploading", "finishing", "retrying", "offline", "done", "error", "cancelled"]
+    name: str = Field(max_length=4096)
+    size: int = Field(ge=0)
+    sent: int = 0
+    stored: int = 0
+    moved: int = 0
+    speed: float | None = None
+    upload: str | None = Field(None, max_length=64)
+    note: str | None = Field(None, max_length=1000)
+    until: float | None = None
+    wait: dict[str, Any] | None = None
+    error: str | None = Field(None, max_length=1000)
+
+
+ClientId = Annotated[str, Field(min_length=8, max_length=64)]
+
+
+class QueueSync(BaseModel):
+    """`items` are only those that changed since the last sync, and `removed`
+    the ids of those dismissed; `cancel` lists other tabs' items (by key) to
+    stop. `epoch` and `since` come from the previous answer."""
+    client: ClientId
+    items: list[QueueItem] = Field(default=[], max_length=100_000)
+    removed: list[int] = Field(default=[], max_length=100_000)
+    cancel: list[str] = Field(default=[], max_length=100_000)
+    epoch: str | None = None
+    since: int = 0
+
+
+class QueueLeave(BaseModel):
+    client: ClientId
 
 
 class NodesMove(BaseModel):
@@ -269,8 +307,8 @@ async def change_vault_password(body: PasswordChange, request: Request,
 
 @router.post("/logout")
 async def logout(request: Request):
-    """Locks the vault and every drive."""
-    request.app.state.sessions.drop(request.cookies.get(COOKIE))
+    """Locks the vault and every drive, on every device."""
+    request.app.state.sessions.end()
     response = Response(status_code=204)
     response.delete_cookie(COOKIE, path="/")
     return response
@@ -532,6 +570,22 @@ async def cancel_upload(node_id: str, drive: Drive = Depends(unlocked_drive), st
     return Response(status_code=204)
 
 
+@router.post("/uploads/sync")
+async def sync_uploads(body: QueueSync, request: Request, session: Session = Depends(unlocked_vault)):
+    """The upload line every device shares; see app/uploadqueue.py. A tab
+    sends the next file only when nothing ahead of it in `order` is still
+    going, and stops any of its items marked `cancel`."""
+    return request.app.state.uploads.sync(
+        body.client, [i.model_dump() for i in body.items], body.removed, body.cancel, body.epoch, body.since)
+
+
+@router.post("/uploads/leave", status_code=204)
+async def leave_uploads(body: QueueLeave, request: Request, session: Session = Depends(unlocked_vault)):
+    """Sent by a closing tab, so the next device need not wait for it to time out."""
+    request.app.state.uploads.leave(body.client)
+    return Response(status_code=204)
+
+
 @router.get("/drives/{name}/files/{node_id}")
 async def download_file(node_id: str, request: Request, inline: bool = False,
                         drive: Drive = Depends(unlocked_drive), store: Storage = Depends(get_store)):
@@ -699,6 +753,7 @@ async def lifespan(app: FastAPI):
     app.state.backup = backup
     app.state.sessions = Sessions(idle_seconds=cfg.session_idle)
     app.state.throttle = LoginThrottle()
+    app.state.uploads = UploadQueue()
     app.state.discards = set()
     try:
         yield

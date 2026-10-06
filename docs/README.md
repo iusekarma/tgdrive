@@ -41,7 +41,8 @@ tgdrive/
 │   │   ├── storage.py      the core: vault, drives, folder tree, upload/download pipeline, thumbnails
 │   │   ├── crypto.py       key hierarchy and AES-GCM sealing
 │   │   ├── db.py           SQLite schema, migration, snapshot/restore
-│   │   ├── sessions.py     in-memory sessions and password-guess throttling
+│   │   ├── sessions.py     the in-memory session every device shares, and password-guess throttling
+│   │   ├── uploadqueue.py  the upload line every device shares (one file at a time)
 │   │   ├── backup.py       debounced database snapshots
 │   │   ├── thumbs.py       safe image → 320px WebP
 │   │   ├── httprange.py    Range header parsing

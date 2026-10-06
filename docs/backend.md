@@ -8,6 +8,7 @@ python-dotenv.
 flowchart TD
     server --> storage
     server --> sessions
+    server --> uploadqueue
     server --> backup
     server --> config
     server --> httprange
@@ -31,6 +32,7 @@ flowchart TD
 - [storage.py](#storagepy)
 - [transport/](#transport)
 - [sessions.py](#sessionspy)
+- [uploadqueue.py](#uploadqueuepy)
 - [backup.py](#backuppy)
 - [thumbs.py](#thumbspy)
 - [httprange.py](#httprangepy)
@@ -293,17 +295,42 @@ limit as Telegram, so behaviour matches.
 
 - **`Session`**: `vault` (`VaultKeys` or None), `drives` (name → unlocked
   `Drive`), `last_seen`.
-- **`Sessions`**: token → `Session`. `create()` makes a 32-byte URL-safe
-  token. `get(token)` returns `None` and forgets the session once it has
-  been idle longer than `idle_seconds`, and otherwise slides the timer
-  forward. `forget_drive(name)` removes an unlocked drive from every
-  session (used after its password changes or it is deleted);
-  `rename_drive` follows a rename in every session.
+- **`Sessions`**: there is one `Session`, shared by every device. Each
+  device that logs in gets its own 32-byte URL-safe token from `create()`,
+  which joins the live session or starts one. `get(token)` returns `None`
+  for an unknown token, and ends the session for everyone once it has been
+  idle longer than `idle_seconds`; otherwise it slides the timer forward.
+  `end()` logs every device out. `forget_drive(name)` re-locks a drive
+  (used after its password changes or it is deleted); `rename_drive`
+  follows a rename.
 - **`LoginThrottle`**: per `(scope, client IP)` counter. Five free wrong
   tries, then the wait doubles from 1 s up to a 60 s cap. A success clears
   the counter. Scope is `"vault"` or a drive name.
 
 Clocks are injectable, so the tests fake time.
+
+---
+
+## uploadqueue.py
+
+**`UploadQueue`**: the upload line every browser tab shares, so only one
+file is sent at a time across all devices, and every device shows the
+same list. It holds no file data: each tab still sends its own files.
+
+- `sync(client, items, removed, cancel, epoch, since)`: a tab (`client`,
+  a random id per tab) reports the rows that changed since its last sync
+  and the ids it dismissed, and may ask other tabs to stop rows (`cancel`,
+  by key `"<client>:<id>"`). It gets back the rows changed since revision
+  `since`, and the order of the whole line if that changed. A tab starts
+  its next file only when nothing ahead of it is still going.
+- New rows join the back of the line; a retried row goes to the back
+  again. A row that is already sending when its tab (re)appears keeps its
+  turn ahead of rows still waiting.
+- A tab that has not synced for `idle_seconds` (60) leaves the line, and so
+  does one that calls `leave()` (sent on `pagehide`). What it had started
+  stays an unfinished upload on the server, ready to resume.
+- `epoch` changes on every restart; with `resend`, the server asks a tab
+  to report all of its rows again.
 
 ---
 
@@ -412,5 +439,5 @@ runs against `LocalTransport` in a temporary folder.
 |---|---|
 | `test_core.py` | Crypto round trips and tamper detection, chunking, upload/download, ranges, snapshot and restore |
 | `test_vault.py` | Vault setup, unlock and recovery; open vs password drives; legacy drive migration; bulk move/delete; Telegram `deleteMessages` batching (with a fake); thumbnail encoding; search ranking |
-| `test_services.py` | `Storage` API surface, resumable uploads (including a flaky transport), `Sessions` idle expiry, `LoginThrottle`, Range parsing, `BackupScheduler` |
+| `test_services.py` | `Storage` API surface, resumable uploads (including a flaky transport), the shared `Sessions` and its idle expiry, `UploadQueue`, `LoginThrottle`, Range parsing, `BackupScheduler` |
 | `test_api.py` | The HTTP API end to end with FastAPI's `TestClient`: files and folders, locking, cookies and errors, drive passwords, rename, resumable upload, thumbnails, search, admin-password setup, static UI serving |

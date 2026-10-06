@@ -109,13 +109,47 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(c.post("/api/drives", json={"name": "x"}).status_code, 401)
         self.assertEqual(c.post("/api/vault/setup", json={"password": "another-pw"}).status_code, 409)
         self.assertEqual(c.post("/api/vault/unlock", json={"password": "master-pw"}).status_code, 200)
-        self.assertEqual(c.get("/api/drives").json(), [{"name": "main", "protected": True, "unlocked": False}])
+        # A second device joins the one session: the drive unlocked on the first is open here too.
+        self.assertEqual(c.get("/api/drives").json(), [{"name": "main", "protected": True, "unlocked": True}])
+        self.assertEqual(c.post("/api/drives/main/lock").status_code, 204)
         self.assertEqual(c.get("/api/drives/main/nodes").status_code, 401)
         self.assertEqual(c.post("/api/drives", json={"name": "main", "password": "password1"}).status_code, 409)
         self.assertEqual(c.post("/api/drives", json={"name": "two", "password": "short"}).status_code, 422)
         self.assertEqual(c.post("/api/drives", json={"name": "bad/name", "password": "password1"}).status_code, 422)
         self.assertEqual(c.post("/api/drives/nope/unlock", json={"password": "password1"}).status_code, 404)
 
+
+    def test_one_session_for_every_device(self):
+        other = TestClient(self._client.app)
+        self.assertEqual(other.get("/api/drives").status_code, 401)   # a password is still needed
+        self.assertEqual(other.post("/api/vault/unlock", json={"password": "master-pw"}).status_code, 200)
+        self.assertNotEqual(other.cookies[COOKIE], self.c.cookies[COOKIE])
+        self.assertEqual(other.get("/api/drives/main/nodes").status_code, 200)
+        self.c.post("/api/drives/main/lock")
+        self.assertEqual(other.get("/api/drives/main/nodes").json()["locked"], "drive")
+        other.post("/api/logout")
+        self.assertEqual(self.c.get("/api/drives").json()["locked"], "vault")
+
+    def test_upload_line_is_shared(self):
+        c = self.c
+        other = TestClient(self._client.app)
+        other.post("/api/vault/unlock", json={"password": "master-pw"})
+        item = {"id": 1, "status": "uploading", "name": "a.bin", "size": 10, "sent": 4, "stored": 0}
+        r = c.post("/api/uploads/sync", json={"client": "tab-one-1", "items": [item]}).json()
+        self.assertEqual(r["order"], ["tab-one-1:1"])
+        r = other.post("/api/uploads/sync", json={
+            "client": "tab-two-2", "items": [{**item, "status": "queued", "name": "b.bin"}],
+            "cancel": ["tab-one-1:1"]}).json()
+        self.assertEqual(r["order"], ["tab-one-1:1", "tab-two-2:1"])
+        self.assertEqual(r["items"][0]["sent"], 4)
+        since = r["rev"]
+        r = c.post("/api/uploads/sync", json={"client": "tab-one-1", "epoch": r["epoch"], "since": 0}).json()
+        self.assertTrue(r["items"][0]["cancel"])
+        self.assertEqual(c.post("/api/uploads/leave", json={"client": "tab-one-1"}).status_code, 204)
+        r = other.post("/api/uploads/sync", json={"client": "tab-two-2", "epoch": r["epoch"], "since": since}).json()
+        self.assertEqual(r["order"], ["tab-two-2:1"])
+        c.cookies.clear()
+        self.assertEqual(c.post("/api/uploads/sync", json={"client": "tab-one-1"}).status_code, 401)
 
     def test_open_drives_and_drive_passwords(self):
         c = self.c

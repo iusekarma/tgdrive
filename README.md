@@ -321,9 +321,12 @@ neither one alone opens the drive, even for someone holding a copy of the
 database. Changing a password re-wraps a single 32-byte key, so it is instant
 regardless of how much the drive holds.
 
-**Sessions.** Unlocked keys live only in server memory. Sessions use an
-HttpOnly, SameSite=Strict cookie and lock after the idle timeout. Restarting
-the server locks everything.
+**Sessions.** Unlocked keys live only in server memory. There is one
+session, shared by every device you log in from: a drive unlocked on your
+laptop is unlocked on your phone too, and logging out (or the idle timeout)
+locks all of them. Each device still needs the master password once, and
+gets its own HttpOnly, SameSite=Strict cookie. Restarting the server locks
+everything.
 
 **Backups.** Within 30 seconds of any change, the server uploads a snapshot
 of the database to the channel and pins it, and it uploads a final one on
@@ -332,7 +335,11 @@ that snapshot. The snapshot contains only wrapped keys and encrypted names,
 but drive names, sizes and timestamps are readable unless you set
 `TGDRIVE_BACKUP_PASSPHRASE`.
 
-**Uploads.** The web UI sends one file at a time and shows its speed, what
+**Uploads.** The web UI sends one file at a time, across all your devices:
+every device shows the same upload list, with progress, and files chosen
+on one device wait behind those another device is already sending. (The
+bytes still come from the device that has the file, so keep that tab open
+until its files are done.) It shows each file's speed, what
 is already stored in Telegram, and when the server is waiting out a Telegram
 rate limit or error. If the connection drops, or Telegram gives up for a
 while, the upload resumes from the last stored chunk (16 MB), trying again
@@ -366,7 +373,7 @@ Interactive docs are served at **http://localhost:8000/api/docs**.
 | GET | `/api/vault` | Whether tgdrive is set up and whether this session has it unlocked |
 | POST | `/api/vault/setup` | First run only: set the master password; returns its recovery key once |
 | POST | `/api/vault/unlock` · `/recover` · `/password` | Unlock / reset with the recovery key / change the master password |
-| POST | `/api/logout` | Lock everything and end the session |
+| POST | `/api/logout` | Lock everything and end the session, on every device |
 | GET | `/api/drives` | List drives, whether each has a password, and whether it is unlocked |
 | POST | `/api/drives` | Create a drive, with or without a password |
 | POST | `/api/drives/{name}/unlock` · `/lock` | Unlock a drive that has a password / lock it again |
@@ -384,6 +391,8 @@ Interactive docs are served at **http://localhost:8000/api/docs**.
 | POST | `/api/drives/{name}/uploads` | Start a resumable upload (`{"filename", "parent_id", "size"}`) |
 | PUT | `/api/drives/{name}/uploads/{id}?offset=N` | Send the file from byte N; 201 when complete, 503 if Telegram gave up (resume later) |
 | GET · DELETE | `/api/drives/{name}/uploads/{id}` | How much is stored and what the server is doing / cancel |
+| POST | `/api/uploads/sync` | The upload line every device shares: report this tab's uploads, get everyone's |
+| POST | `/api/uploads/leave` | A closing tab leaves the upload line |
 | GET | `/api/drives/{name}/files/{id}` | Download; supports `Range` and `?inline=true` |
 | GET · PUT | `/api/drives/{name}/files/{id}/thumbnail` | Get or upload a 320px WebP thumbnail |
 

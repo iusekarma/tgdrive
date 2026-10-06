@@ -76,8 +76,9 @@ flowchart TB
 
 The Dockerfile runs `uvicorn --workers 1`, and this is a hard requirement:
 
-- Unlocked vault and drive keys are in `app.state.sessions`, a Python dict.
-  A second worker would not see them.
+- Unlocked vault and drive keys are in `app.state.sessions`, the one
+  session every device shares. A second worker would not see them.
+- The upload line every device shares (`app.state.uploads`) is in memory.
 - In-progress resumable uploads (`Storage._uploads`) are in memory.
 - There is one SQLite connection, used only from the event loop thread.
 

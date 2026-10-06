@@ -137,8 +137,9 @@ reach it over a network.
 ## Other protections
 
 - **Sessions**: a 32-byte random token in an `HttpOnly`, `SameSite=Strict`
-  cookie (`Secure` when `TGDRIVE_COOKIE_SECURE=true`). Sessions expire after
-  30 minutes idle by default.
+  cookie (`Secure` when `TGDRIVE_COOKIE_SECURE=true`), one per device. All
+  devices share one session, which expires after 30 minutes idle by
+  default; logging out ends it everywhere.
 - **Password guessing**: after 5 wrong tries from one client IP for one
   scope (the vault, or one drive), each further try must wait 1 s, 2 s,
   4 s, ... up to 60 s. Combined with Argon2id at 64 MiB, this makes online
