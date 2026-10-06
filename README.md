@@ -306,6 +306,9 @@ All settings go in `backend/.env` (see [backend/.env.example](backend/.env.examp
 
 ## How it works
 
+A summary follows. For diagrams and a walkthrough of every module, see
+[docs/](docs/README.md).
+
 **Storage.** Every file is split into chunks, each encrypted with a key
 unique to that file, and sent to the channel as a document message. The
 local SQLite database records which messages make up which file, along with
