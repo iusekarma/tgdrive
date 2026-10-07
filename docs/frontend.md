@@ -49,6 +49,7 @@ invalidation refreshes everything affected:
 | `["nodes", drive, parent]` | One folder listing | Any change in that drive (`["nodes", drive]` prefix) |
 | `["nodes", drive, "search", q]` | Search results | Same prefix, so results refresh with the folder |
 | `["info", drive, id]` | A file's details | Never refetched (`staleTime: Infinity`); updated in place by whatever learns more |
+| `["webdav", drive]` | `GET /drives/{name}/webdav` | Set in place when WebDAV is turned on or off |
 | `["zip", drive, id]` | A zip's entry list | Never refetched; dropped with everything else when the vault locks |
 | `["comicPage", drive, id, path]` | One decompressed comic page | Garbage-collected 30 s after it leaves the screen |
 
@@ -224,7 +225,8 @@ server), and `driveUrl(drive, folderId)`.
 
 The home page: every drive as a list or grid, with a lock dial showing
 whether it is unlocked. Opening a locked drive shows `UnlockDialog`.
-A drive's menu offers lock, rename, add/change/remove password, and delete.
+A drive's menu offers lock, rename, add/change/remove password, WebDAV
+access, and delete; drives with WebDAV on say so under their name.
 The page header offers create drive, change master password and lock
 everything.
 
@@ -274,6 +276,8 @@ Clicking a locked drive goes to the drives page to unlock it.
 | `DrivePasswordDialog` | Add, change or remove a drive password |
 | `MasterPasswordDialog` | Change the master password |
 | `DeleteDriveDialog` | Type the drive's password (or the master password) to delete it |
+| `WebDavDialog` | WebDAV on or off for a drive. Turning it on (or making a new password) asks for the drive's password, or the master password, and a read-only choice, then shows the address, user name and generated password once. Warns when the page is on plain HTTP away from localhost. Reads `["webdav", drive]` |
+| `CopyButton` | Copies text and says "Copied" for two seconds; used by the recovery key and WebDAV dialogs |
 
 ## components/fileDialogs.tsx
 

@@ -61,6 +61,13 @@ class Drive:
 class DriveSummary:
     name: str
     protected: bool
+    webdav: bool = False
+
+
+@dataclass
+class WebDavAccess:
+    read_only: bool
+    created_at: int
 
 
 @dataclass
@@ -232,12 +239,14 @@ class Storage:
     # --- drives -------------------------------------------------------------
 
     def list_drives(self) -> list[DriveSummary]:
-        return [DriveSummary(r["name"], r["mode"] != "open")
-                for r in self.conn.execute("SELECT name, mode FROM drives ORDER BY name")]
+        return [DriveSummary(r["name"], r["mode"] != "open", bool(r["webdav"]))
+                for r in self.conn.execute(
+                    "SELECT name, mode, EXISTS (SELECT 1 FROM webdav w WHERE w.drive_id = d.id) AS webdav "
+                    "FROM drives d ORDER BY name")]
 
     def drive_info(self, name: str) -> DriveSummary:
         row = self._drive_row(name)
-        return DriveSummary(row["name"], row["mode"] != "open")
+        return DriveSummary(row["name"], row["mode"] != "open", self.webdav_access(name) is not None)
 
     def _drive_row(self, name: str) -> sqlite3.Row:
         row = self.conn.execute("SELECT * FROM drives WHERE name = ?", (name,)).fetchone()
@@ -341,6 +350,43 @@ class Storage:
         except sqlite3.IntegrityError:
             raise Conflict(f"drive already exists: {new_name}") from None
         drive.name = new_name
+
+    # --- WebDAV access ------------------------------------------------------
+
+    def webdav_access(self, name: str) -> WebDavAccess | None:
+        row = self.conn.execute(
+            "SELECT w.read_only, w.created_at FROM webdav w JOIN drives d ON d.id = w.drive_id WHERE d.name = ?",
+            (name,)).fetchone()
+        return WebDavAccess(bool(row["read_only"]), row["created_at"]) if row else None
+
+    def enable_webdav(self, drive: Drive, read_only: bool) -> str:
+        """Turns on WebDAV for the drive, or replaces its password. Returns the
+        new password: it is not stored, show it to the user once. Anyone with
+        it can open this drive without the master password."""
+        password, wrapped = crypto.wrap_with_access(drive.id, drive.keys.master_key, read_only)
+        with self.conn:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO webdav (drive_id, read_only, wrapped_key, created_at) VALUES (?, ?, ?, ?)",
+                (drive.id, int(read_only), wrapped, int(time.time())))
+        return password
+
+    def disable_webdav(self, name: str) -> None:
+        """Needs no key: taking access away is always allowed."""
+        row = self._drive_row(name)
+        with self.conn:
+            self.conn.execute("DELETE FROM webdav WHERE drive_id = ?", (row["id"],))
+
+    def open_webdav(self, name: str, password: str) -> tuple[Drive, bool]:
+        """The drive and whether the password is read-only. Raises BadKey for a
+        wrong password and NotFound when the drive has no WebDAV access."""
+        row = self.conn.execute(
+            "SELECT d.id, d.name, d.mode, w.read_only, w.wrapped_key FROM drives d "
+            "JOIN webdav w ON w.drive_id = d.id WHERE d.name = ?", (name,)).fetchone()
+        if row is None:
+            raise NotFound(f"no WebDAV access to: {name}")
+        read_only = bool(row["read_only"])
+        master = crypto.unwrap_with_access(row["id"], password, read_only, row["wrapped_key"])
+        return Drive(row["id"], row["name"], crypto.DriveKeys(master), row["mode"] != "open"), read_only
 
     def detach_drive(self, drive: Drive) -> list[BlobRef]:
         """Removes the drive from the database; returns its blobs to discard."""
@@ -477,6 +523,26 @@ class Storage:
                 "UPDATE nodes SET name_enc = ? WHERE id = ?",
                 (drive.keys.encrypt_name(node_id, new_name), node_id),
             )
+
+    def relocate(self, drive: Drive, node_id: str, new_parent_id: str | None, new_name: str) -> None:
+        """Moves and renames in one step, so the name is only checked where it lands."""
+        node = self._node(drive, node_id)
+        entry = self.stat(drive, node_id)
+        if node["parent_id"] == new_parent_id and entry.name == new_name:
+            return
+        self._check_name(new_name)
+        self._dir(drive, new_parent_id)
+        if node_id in {c.id for c in self.path(drive, new_parent_id)}:
+            raise StorageError("cannot move a folder into itself")
+        taken = self._names_in(drive, new_parent_id)
+        if node["parent_id"] == new_parent_id:
+            taken.discard(entry.name)   # its own name, about to change
+        if new_name in taken:
+            raise Conflict(f"already exists: {new_name}")
+        with self.conn:
+            self.conn.execute(
+                "UPDATE nodes SET parent_id = ?, name_enc = ? WHERE id = ?",
+                (new_parent_id, drive.keys.encrypt_name(node_id, new_name), node_id))
 
     def move(self, drive: Drive, node_id: str, new_parent_id: str | None) -> None:
         self.move_many(drive, [node_id], new_parent_id)

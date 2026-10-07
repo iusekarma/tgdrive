@@ -11,6 +11,7 @@
                        drives without a password           binding key) wraps the master
                                                            key of password drives
     drive recovery key (random) --wraps--> drive master key  (password drives only)
+    WebDAV password (random) -----wraps--> drive master key  (drives with WebDAV on)
 
     drive master key --HKDF--> file-key wrapping key, name key
     per-file random key --AES-256-GCM--> chunks and the thumbnail
@@ -174,6 +175,45 @@ def wrap_with_recovery(drive_id: str, master_key: bytes) -> tuple[str, bytes]:
 def unwrap_with_recovery(drive_id: str, recovery_key: str, wrapped: bytes) -> bytes:
     kek = _hkdf(_parse_recovery(recovery_key), b"tgdrive/recovery")
     return _open(kek, wrapped, b"tgdrive/drive-key/rk|" + drive_id.encode())
+
+
+# --- WebDAV access password -------------------------------------------------
+#
+# Generated, never chosen: 160 random bits can't be guessed, so a fast HKDF
+# is enough and every WebDAV request can check it without Argon2. It opens
+# its one drive on its own, with no master password, which is what lets a
+# mounted drive keep working while the web UI is locked or after a restart.
+
+ACCESS_LEN = 20
+
+
+def _access_aad(drive_id: str, read_only: bool) -> bytes:
+    # The access level is bound in, so flipping it in the database breaks the key.
+    return b"tgdrive/drive-key/dav|" + drive_id.encode() + (b"|ro" if read_only else b"|rw")
+
+
+def _parse_access(text: str) -> bytes:
+    s = "".join(text.split()).replace("-", "").upper()
+    s += "=" * (-len(s) % 8)
+    try:
+        raw = base64.b32decode(s)
+    except Exception:
+        raise BadKey("malformed access password") from None
+    if len(raw) != ACCESS_LEN:
+        raise BadKey("malformed access password")
+    return raw
+
+
+def wrap_with_access(drive_id: str, master_key: bytes, read_only: bool) -> tuple[str, bytes]:
+    """Returns (password_to_show_once, wrapped_key)."""
+    raw = os.urandom(ACCESS_LEN)
+    kek = _hkdf(raw, b"tgdrive/webdav")
+    return _format_recovery(raw), _seal(kek, master_key, _access_aad(drive_id, read_only))
+
+
+def unwrap_with_access(drive_id: str, password: str, read_only: bool, wrapped: bytes) -> bytes:
+    kek = _hkdf(_parse_access(password), b"tgdrive/webdav")
+    return _open(kek, wrapped, _access_aad(drive_id, read_only))
 
 
 def new_master_key() -> bytes:

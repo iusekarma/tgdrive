@@ -30,6 +30,7 @@ from .storage import (Conflict, Drive, Gone, NoSnapshot, NotFound, NoVault, Stor
                       TransportUnavailable, UploadState, restore_database)
 from .transport import BlobRef
 from .uploadqueue import UploadQueue
+from .webdav import router as webdav_router
 
 log = logging.getLogger("tgdrive")
 
@@ -89,6 +90,12 @@ class DrivePassword(BaseModel):
     needed only if it has one; a null `new_password` removes it."""
     current_password: Password | None = None
     new_password: NewPassword | None = None
+
+
+class WebDavEnable(BaseModel):
+    """Confirm with the drive's password, or the master password if it has none."""
+    password: Password
+    read_only: bool = False
 
 
 class FolderCreate(BaseModel):
@@ -331,7 +338,8 @@ async def logout(request: Request):
 @router.get("/drives")
 async def list_drives(session: Session = Depends(unlocked_vault), store: Storage = Depends(get_store)):
     return [
-        {"name": d.name, "protected": d.protected, "unlocked": not d.protected or d.name in session.drives}
+        {"name": d.name, "protected": d.protected, "unlocked": not d.protected or d.name in session.drives,
+         "webdav": d.webdav}
         for d in store.list_drives()
     ]
 
@@ -404,16 +412,56 @@ async def rename_drive(name: str, body: DriveRename, request: Request, drive: Dr
     return {"name": body.name}
 
 
+async def _confirm(request: Request, session: Session, store: Storage, name: str, password: str) -> Drive:
+    """Opens the drive with its password, or with the master password if it has none."""
+    if store.drive_info(name).protected:
+        return await _throttled(request, name, lambda: store.unlock(session.vault, name, password))
+    await _throttled(request, "vault", lambda: store.unlock_vault(password))
+    return store.open_drive(session.vault, name)
+
+
+def _webdav_status(store: Storage, name: str) -> dict:
+    access = store.webdav_access(name)
+    return {
+        "enabled": access is not None,
+        "read_only": access.read_only if access else False,
+        "created_at": access.created_at if access else None,
+        "path": f"/dav/{quote(name)}/",
+    }
+
+
+@router.get("/drives/{name}/webdav")
+async def webdav_status(name: str, session: Session = Depends(unlocked_vault), store: Storage = Depends(get_store)):
+    """Whether the drive can be mounted over WebDAV at `path`."""
+    return _webdav_status(store, name)
+
+
+@router.post("/drives/{name}/webdav")
+async def enable_webdav(name: str, body: WebDavEnable, request: Request, session: Session = Depends(unlocked_vault),
+                        store: Storage = Depends(get_store)):
+    """Turns on WebDAV, or replaces its password (the old one stops working).
+    Returns the new password once. It opens this drive on its own, without
+    the master password, so it is only given out after confirming one."""
+    drive = await _confirm(request, session, store, name, body.password)
+    password = store.enable_webdav(drive, body.read_only)
+    _changed(request)
+    return {**_webdav_status(store, name), "password": password}
+
+
+@router.delete("/drives/{name}/webdav", status_code=204)
+async def disable_webdav(name: str, request: Request, session: Session = Depends(unlocked_vault),
+                         store: Storage = Depends(get_store)):
+    store.disable_webdav(name)
+    _changed(request)
+    return Response(status_code=204)
+
+
 @router.post("/drives/{name}/delete")
 async def delete_drive(name: str, body: Unlock, request: Request, session: Session = Depends(unlocked_vault),
                        store: Storage = Depends(get_store)):
     """Permanently deletes the drive and every file in it. Confirm with the
     drive's password, or the master password if it has none."""
-    if store.drive_info(name).protected:
-        drive = await _throttled(request, name, lambda: store.unlock(session.vault, name, body.password))
-    else:
-        await _throttled(request, "vault", lambda: store.unlock_vault(body.password))
-        drive = store.open_drive(session.vault, name)
+    drive = await _confirm(request, session, store, name, body.password)
     _discard_later(request, store.detach_drive(drive))
     request.app.state.sessions.forget_drive(name)
     _changed(request)
@@ -729,7 +777,7 @@ def _serve_ui(app: FastAPI, static_dir: str) -> None:
 
     @app.api_route("/{path:path}", methods=["GET", "HEAD"], include_in_schema=False)
     async def ui(path: str):
-        if path == "api" or path.startswith("api/"):
+        if path in ("api", "dav") or path.startswith(("api/", "dav/")):
             raise HTTPException(404, "not found")
         file = os.path.realpath(os.path.join(root, path))
         if path and file.startswith(root + os.sep) and os.path.isfile(file):
@@ -800,6 +848,7 @@ def create_app(cfg: Config | None = None) -> FastAPI:
                   docs_url="/api/docs", openapi_url="/api/openapi.json", redoc_url=None)
     app.state.cfg = cfg or Config.from_env()
     app.include_router(router)
+    app.include_router(webdav_router)
     if app.state.cfg.static_dir:
         _serve_ui(app, app.state.cfg.static_dir)  # after the API, so /api routes match first
 

@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { HardDrive, KeyRound, Lock, LockOpen, Pencil, Plus, ShieldPlus, Trash2 } from "lucide-react";
+import { HardDrive, KeyRound, Lock, LockOpen, Network, Pencil, Plus, ShieldPlus, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
@@ -12,6 +12,7 @@ import {
   RecoveryKeyDialog,
   RenameDriveDialog,
   UnlockDialog,
+  WebDavDialog,
   type PasswordAction,
 } from "../components/driveDialogs";
 import LockDial from "../components/LockDial";
@@ -31,10 +32,12 @@ type Open =
   | { type: "delete"; drive: DriveInfo }
   | { type: "recoveryKey"; drive: string; recoveryKey: string; open: boolean }
   | { type: "masterPassword" }
+  | { type: "webdav"; drive: DriveInfo }
   | null;
 
 function status(d: DriveInfo): string {
-  return !d.protected ? "Opens with the master password" : d.unlocked ? "Unlocked" : "Locked";
+  const lock = !d.protected ? "Opens with the master password" : d.unlocked ? "Unlocked" : "Locked";
+  return d.webdav ? `${lock} · WebDAV on` : lock;
 }
 
 function DriveIcon({ drive }: { drive: DriveInfo }) {
@@ -126,6 +129,10 @@ export default function DrivesPage() {
                   Add a password
                 </MenuItem>
               )}
+              <MenuItem onSelect={pick({ type: "webdav", drive: d })}>
+                <Network size={16} />
+                WebDAV access
+              </MenuItem>
               <MenuItem danger onSelect={pick({ type: "delete", drive: d })}>
                 <Trash2 size={16} />
                 Delete drive
@@ -309,6 +316,14 @@ export default function DrivesPage() {
         />
       )}
       {open?.type === "masterPassword" && <MasterPasswordDialog onClose={close} />}
+      {open?.type === "webdav" && (
+        <WebDavDialog
+          drive={open.drive.name}
+          isProtected={open.drive.protected}
+          onClose={close}
+          onChanged={() => void refreshDrives()}
+        />
+      )}
     </>
   );
 }

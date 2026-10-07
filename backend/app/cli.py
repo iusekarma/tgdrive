@@ -13,6 +13,8 @@
     python -m app.cli reset-password DRIVE              (uses the drive's recovery key)
     python -m app.cli rename-drive DRIVE NEW_NAME
     python -m app.cli rm-drive DRIVE
+    python -m app.cli webdav DRIVE [status|on|off] [--read-only]
+                                                        (on also gives a new password)
     python -m app.cli backup
     python -m app.cli restore [--overwrite]
 
@@ -26,6 +28,7 @@ import asyncio
 import getpass
 import os
 import sys
+from urllib.parse import quote
 
 from . import crypto, db
 from .config import Config
@@ -101,7 +104,19 @@ async def run(args: argparse.Namespace) -> None:
             print("master password updated")
         elif args.cmd == "drives":
             for d in store.list_drives():
-                print(f"{'password' if d.protected else 'open':8}  {d.name}")
+                print(f"{'password' if d.protected else 'open':8}  {'webdav' if d.webdav else '':6}  {d.name}")
+        elif args.cmd == "webdav" and args.action != "on":
+            if args.action == "off":
+                store.disable_webdav(args.drive)
+                await store.backup()
+                print(f"WebDAV turned off for '{args.drive}'")
+            else:
+                access = store.webdav_access(args.drive)
+                if access is None:
+                    print(f"WebDAV is off for '{args.drive}'")
+                else:
+                    print(f"WebDAV is on for '{args.drive}' ({'read-only' if access.read_only else 'read and write'}), "
+                          f"at /dav/{quote(args.drive)}/")
         elif args.cmd == "create-drive":
             password = None if args.no_password else _new_password("Drive password: ")
             _, recovery = await store.create_drive(vault, args.name, password)
@@ -148,6 +163,15 @@ async def run(args: argparse.Namespace) -> None:
                 store.rename_drive(drive, args.new_name)
                 await store.backup()
                 print(f"renamed drive '{args.drive}' to '{args.new_name}'")
+            elif args.cmd == "webdav":
+                password = store.enable_webdav(drive, args.read_only)
+                await store.backup()
+                print(f"WebDAV is on for '{args.drive}' ({'read-only' if args.read_only else 'read and write'})\n")
+                print(f"  address:   https://<your server>/dav/{quote(args.drive)}/")
+                print("  user name: anything")
+                print(f"  password:  {password}\n")
+                print("Shown once and not stored. Anyone with it can open this drive without the master")
+                print("password; run `webdav DRIVE on` again for a new one, or `off` to turn it off.")
             elif args.cmd == "rm-drive":
                 await store.delete_drive(drive)
                 await store.backup()
@@ -171,6 +195,10 @@ def main() -> None:
     sub.add_parser("ls").add_argument("drive")
     s = sub.add_parser("rename-drive"); s.add_argument("drive"); s.add_argument("new_name")
     sub.add_parser("rm-drive").add_argument("drive")
+    s = sub.add_parser("webdav", help="turn WebDAV access to a drive on or off")
+    s.add_argument("drive")
+    s.add_argument("action", nargs="?", choices=["status", "on", "off"], default="status")
+    s.add_argument("--read-only", action="store_true", help="with on: allow reading only")
     s = sub.add_parser("put"); s.add_argument("drive"); s.add_argument("path"); s.add_argument("--as", dest="name")
     s = sub.add_parser("get"); s.add_argument("drive"); s.add_argument("name"); s.add_argument("out")
     s = sub.add_parser("rm"); s.add_argument("drive"); s.add_argument("name")

@@ -42,7 +42,8 @@ class ApiTest(unittest.TestCase):
 
     def test_files_and_folders(self):
         c = self.c
-        self.assertEqual(c.get("/api/drives").json(), [{"name": "main", "protected": True, "unlocked": True}])
+        self.assertEqual(c.get("/api/drives").json(),
+                         [{"name": "main", "protected": True, "unlocked": True, "webdav": False}])
 
         folder = c.post("/api/drives/main/folders", json={"name": "docs"}).json()
         data = os.urandom(5000)
@@ -110,7 +111,8 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(c.post("/api/vault/setup", json={"password": "another-pw"}).status_code, 409)
         self.assertEqual(c.post("/api/vault/unlock", json={"password": "master-pw"}).status_code, 200)
         # A second device joins the one session: the drive unlocked on the first is open here too.
-        self.assertEqual(c.get("/api/drives").json(), [{"name": "main", "protected": True, "unlocked": True}])
+        self.assertEqual(c.get("/api/drives").json(),
+                         [{"name": "main", "protected": True, "unlocked": True, "webdav": False}])
         self.assertEqual(c.post("/api/drives/main/lock").status_code, 204)
         self.assertEqual(c.get("/api/drives/main/nodes").status_code, 401)
         self.assertEqual(c.post("/api/drives", json={"name": "main", "password": "password1"}).status_code, 409)

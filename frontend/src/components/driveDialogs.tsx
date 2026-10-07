@@ -1,8 +1,9 @@
-import { Check, Copy } from "lucide-react";
-import { useState, type FormEvent, type ReactNode } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { Check, Copy, TriangleAlert } from "lucide-react";
+import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 
-import { api } from "../api";
-import { DRIVE_NAME, PASSWORD_MIN } from "../format";
+import { api, type WebDavStatus } from "../api";
+import { DRIVE_NAME, formatDate, PASSWORD_MIN } from "../format";
 import { Button, Dialog, DialogActions, ErrorNote, Field, useSubmit } from "./ui";
 
 export function checkNewPassword(password: string, repeat: string): string | null {
@@ -262,6 +263,30 @@ export function RenameDriveDialog({
 }
 
 /** Shows a recovery key exactly once. The only way out is to confirm it has been saved. */
+/** Copies `text`, and says so for a moment. */
+export function CopyButton({ text, label, className = "" }: { text: string; label: string; className?: string }) {
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    if (!copied) return;
+    const t = setTimeout(() => setCopied(false), 2000);
+    return () => clearTimeout(t);
+  }, [copied]);
+  return (
+    <Button
+      className={className}
+      onClick={() =>
+        void navigator.clipboard.writeText(text).then(
+          () => setCopied(true),
+          () => setCopied(false),
+        )
+      }
+    >
+      {copied ? <Check size={16} /> : <Copy size={16} />}
+      {copied ? "Copied" : label}
+    </Button>
+  );
+}
+
 export function RecoveryKeyDialog({
   title,
   recoveryKey,
@@ -276,16 +301,6 @@ export function RecoveryKeyDialog({
   children: ReactNode;
 }) {
   const [saved, setSaved] = useState(false);
-  const [copied, setCopied] = useState(false);
-
-  async function copy() {
-    try {
-      await navigator.clipboard.writeText(recoveryKey);
-      setCopied(true);
-    } catch {
-      setCopied(false);
-    }
-  }
 
   return (
     <Dialog title={title} onClose={() => saved && onDone()}>
@@ -293,10 +308,7 @@ export function RecoveryKeyDialog({
       <div className="mt-4 rounded-md border border-brass/50 bg-brass/10 p-4">
         <p className="select-all break-words text-lg font-medium leading-relaxed tracking-wide">{recoveryKey}</p>
       </div>
-      <Button onClick={copy} className="mt-3">
-        {copied ? <Check size={16} /> : <Copy size={16} />}
-        {copied ? "Copied" : "Copy key"}
-      </Button>
+      <CopyButton text={recoveryKey} label="Copy key" className="mt-3" />
       <label className="mt-5 flex items-start gap-2.5 text-sm">
         <input
           type="checkbox"
@@ -511,6 +523,203 @@ export function DeleteDriveDialog({
           </Button>
         </DialogActions>
       </form>
+    </Dialog>
+  );
+}
+
+function CopyRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <p className="text-sm font-medium">{label}</p>
+      <div className="mt-1.5 flex items-center gap-2">
+        <code
+          className="min-w-0 flex-1 select-all break-all rounded-md border border-line bg-surface px-3 py-2 text-sm"
+        >
+          {value}
+        </code>
+        <CopyButton text={value} label="Copy" className="shrink-0" />
+      </div>
+    </div>
+  );
+}
+
+/** Mounting a drive as a network drive. The WebDAV password is made by the
+ * server, shown once, and opens this drive by itself, so turning it on is
+ * confirmed with a password; turning it off is not. */
+export function WebDavDialog({
+  drive,
+  isProtected,
+  onClose,
+  onChanged,
+}: {
+  drive: string;
+  isProtected: boolean;
+  onClose: () => void;
+  onChanged: () => void;
+}) {
+  const queryClient = useQueryClient();
+  const status = useQuery({ queryKey: ["webdav", drive], queryFn: () => api.webdav(drive) });
+  const [confirming, setConfirming] = useState(false);
+  const [readOnly, setReadOnly] = useState(false);
+  const [password, setPassword] = useState("");
+  const [issued, setIssued] = useState<string | null>(null);
+  const [saved, setSaved] = useState(false);
+  const { busy, error, run } = useSubmit();
+
+  const address = status.data ? `${location.origin}${status.data.path}` : "";
+  // Basic auth sends the password with every request; only HTTPS keeps it off the wire.
+  const insecure = location.protocol === "http:" && !["localhost", "127.0.0.1", "[::1]"].includes(location.hostname);
+
+  function changed(next: WebDavStatus) {
+    queryClient.setQueryData(["webdav", drive], next);
+    onChanged();
+  }
+
+  function submit(e: FormEvent) {
+    e.preventDefault();
+    void run(async () => {
+      const { password: issuedPassword, ...next } = await api.enableWebdav(drive, password, readOnly);
+      changed(next);
+      setIssued(issuedPassword);
+      setConfirming(false);
+      setPassword("");
+    });
+  }
+
+  if (issued && status.data) {
+    return (
+      <Dialog title={`WebDAV for ${drive}`} onClose={() => saved && onClose()}>
+        <div className="space-y-4">
+          <p className="text-sm text-muted">
+            Add a network drive (WebDAV) in your file manager with these details. The password is shown once and is not
+            stored anywhere.
+          </p>
+          <CopyRow label="Address" value={address} />
+          <CopyRow label="User name" value={drive} />
+          <div>
+            <p className="text-sm font-medium">Password</p>
+            <div className="mt-1.5 rounded-md border border-brass/50 bg-brass/10 p-4">
+              <p className="select-all break-words text-lg font-medium leading-relaxed tracking-wide">{issued}</p>
+            </div>
+            <CopyButton text={issued} label="Copy password" className="mt-3" />
+          </div>
+          <p className="text-xs text-muted">Any user name works; the password is what counts.</p>
+          <label className="flex items-start gap-2.5 text-sm">
+            <input
+              type="checkbox"
+              className="mt-0.5 h-4 w-4"
+              checked={saved}
+              onChange={(e) => setSaved(e.target.checked)}
+            />
+            I have saved this password.
+          </label>
+        </div>
+        <DialogActions>
+          <Button variant="primary" disabled={!saved} onClick={onClose}>
+            Done
+          </Button>
+        </DialogActions>
+      </Dialog>
+    );
+  }
+
+  const enabled = status.data?.enabled ?? false;
+  return (
+    <Dialog title={`WebDAV for ${drive}`} onClose={onClose}>
+      {status.isPending && <p className="text-sm text-muted">Loading…</p>}
+      {status.error && <ErrorNote>{status.error.message}</ErrorNote>}
+      {status.data && (
+        <div className="space-y-4">
+          <p className="text-sm text-muted">
+            WebDAV lets you open this drive as a network drive in Windows Explorer, macOS Finder, Linux file managers or
+            apps like rclone, without the browser.
+          </p>
+          {insecure && (
+            <p className="flex gap-2 rounded-md border border-danger/40 bg-danger/10 px-3 py-2 text-sm text-danger">
+              <TriangleAlert size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
+              This page is on plain HTTP, so the WebDAV password would cross the network readable by anyone on the
+              way. Serve tgdrive over HTTPS before using it.
+            </p>
+          )}
+
+          {enabled && !confirming && (
+            <>
+              <CopyRow label="Address" value={address} />
+              <p className="text-sm">
+                {status.data.read_only ? "Read-only" : "Read and write"}
+                {status.data.created_at !== null && (
+                  <span className="text-muted"> · password made {formatDate(status.data.created_at)}</span>
+                )}
+              </p>
+              <p className="text-sm text-muted">
+                The password was shown when it was made. If it is lost, make a new one; the old one stops working.
+              </p>
+              <ErrorNote>{error}</ErrorNote>
+              <DialogActions>
+                <Button
+                  variant="danger"
+                  disabled={busy}
+                  className="mr-auto"
+                  onClick={() =>
+                    void run(async () => {
+                      await api.disableWebdav(drive);
+                      changed({ ...status.data, enabled: false, created_at: null });
+                    })
+                  }
+                >
+                  {busy ? "Turning off…" : "Turn off"}
+                </Button>
+                <Button
+                  onClick={() => {
+                    setReadOnly(status.data.read_only);
+                    setConfirming(true);
+                  }}
+                >
+                  New password
+                </Button>
+              </DialogActions>
+            </>
+          )}
+
+          {(!enabled || confirming) && (
+            <form onSubmit={submit} className="space-y-4">
+              <p className="rounded-md border border-brass/50 bg-brass/10 px-3 py-2 text-sm">
+                Anyone with the WebDAV password can open this drive without the master password, even while tgdrive is
+                locked. Turn it off here at any time.
+              </p>
+              <label className="flex items-start gap-2.5 text-sm">
+                <input
+                  type="checkbox"
+                  className="mt-0.5 h-4 w-4"
+                  checked={readOnly}
+                  onChange={(e) => setReadOnly(e.target.checked)}
+                />
+                <span>
+                  Read-only
+                  <span className="block text-muted">Files can be opened and copied out, but not changed.</span>
+                </span>
+              </label>
+              <Field
+                label={isProtected ? "Drive password" : "Master password"}
+                type="password"
+                autoComplete="current-password"
+                autoFocus
+                required
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                hint="To confirm it's you."
+              />
+              <ErrorNote>{error}</ErrorNote>
+              <DialogActions>
+                <Button onClick={confirming ? () => setConfirming(false) : onClose}>Cancel</Button>
+                <Button variant="primary" type="submit" disabled={busy}>
+                  {busy ? "Working…" : confirming ? "Make new password" : "Turn on WebDAV"}
+                </Button>
+              </DialogActions>
+            </form>
+          )}
+        </div>
+      )}
     </Dialog>
   );
 }

@@ -10,6 +10,7 @@ have a password of its own.
 - End-to-end encrypted: Telegram only ever sees encrypted chunks
 - Web UI with folders (upload whole folders), uploads that resume after a dropped connection, search, image and video thumbnails, a full-window viewer (images, video including MPEG-TS, audio, PDF, text, zip contents, CBZ comics read a page at a time), and range downloads (video seeking)
 - Several drives, each optionally protected by its own password
+- Mount any drive as a network drive over WebDAV (Windows, macOS, Linux, rclone)
 - Recovery keys for every password
 - The database is backed up to the channel automatically, so a lost server is not a lost drive
 - One Docker container; a CLI and an HTTP API are included
@@ -24,6 +25,7 @@ have a password of its own.
 - [Step 3: First login](#step-3-first-login)
 - [Changing the host and port](#changing-the-host-and-port)
 - [Accessing it from other devices](#accessing-it-from-other-devices)
+- [Mounting a drive (WebDAV)](#mounting-a-drive-webdav)
 - [Starting and stopping](#starting-and-stopping)
 - [What you must not lose](#what-you-must-not-lose)
 - [Updating](#updating)
@@ -180,6 +182,41 @@ To reach tgdrive from your phone or other computers:
   `http://<server-ip>:8000`. Your passwords then travel unencrypted over the
   network, so don't do this on networks you don't trust.
 
+## Mounting a drive (WebDAV)
+
+Any drive can be opened as a network drive, so files can be copied in and
+out with your file manager or synced with tools like rclone.
+
+1. On the drives page, open a drive's menu and choose **WebDAV access** (or
+   run `python -m app.cli webdav DRIVE on`).
+2. Confirm with the drive's password (the master password for a drive
+   without one) and choose whether it is read-only.
+3. tgdrive shows an address such as `https://drive.example.com/dav/Photos/`
+   and a generated password, **once**. Any user name works.
+
+| Client | How to connect |
+|---|---|
+| Windows | File Explorer → This PC → *Map network drive* → the address. Windows only sends passwords to WebDAV over HTTPS. |
+| macOS | Finder → Go → *Connect to Server* → the address |
+| Linux (GNOME, KDE) | *Other Locations* → `davs://drive.example.com/dav/Photos/` (`dav://` for plain HTTP) |
+| rclone | `rclone config` → type `webdav`, vendor `other`, the address, any user, the password |
+
+Things to know:
+
+- **The WebDAV password opens that drive by itself**, without the master
+  password, and keeps working while tgdrive is locked or after a restart.
+  That's what lets a mounted drive stay mounted. Treat it like a key to
+  that one drive. Turning WebDAV off, or making a new password, stops the
+  old one at once.
+- **Use HTTPS.** WebDAV clients send the password with every request; over
+  plain HTTP anyone on the network can read it.
+- Uploads over WebDAV go straight to Telegram, one request per file, and
+  don't join the web UI's shared upload line. Copying a folder within the
+  drive re-uploads every file in it, since each file has its own key.
+- Behind a reverse proxy, pass the WebDAV methods through and don't limit
+  or buffer request bodies (for nginx: `client_max_body_size 0;` and
+  `proxy_request_buffering off;`).
+
 ## Starting and stopping
 
 ```bash
@@ -248,6 +285,7 @@ It asks for the master password, or reads it from `TGDRIVE_MASTER_PASSWORD`.
 | `create-drive NAME [--no-password]` | Create a drive, with or without its own password |
 | `rename-drive DRIVE NEW_NAME` | Rename a drive (its keys and files are unchanged) |
 | `rm-drive DRIVE` | Delete a drive and all its files |
+| `webdav DRIVE [status\|on\|off] [--read-only]` | Show WebDAV access, turn it on (prints a new password once) or off |
 | `put DRIVE FILE [--as NAME]` | Upload a file, optionally under another name |
 | `ls DRIVE` | List files |
 | `get DRIVE NAME OUT` | Download a file |
@@ -382,6 +420,7 @@ Interactive docs are served at **http://localhost:8000/api/docs**.
 | POST | `/api/drives/{name}/password` | Add, change or remove the drive's password |
 | POST | `/api/drives/{name}/rename` | Rename the drive (`{"name": ...}`); a drive with a password must be unlocked |
 | POST | `/api/drives/{name}/delete` | Delete the drive and all its files |
+| GET · POST · DELETE | `/api/drives/{name}/webdav` | WebDAV status / turn on or make a new password (`{"password", "read_only"}`; returns it once) / turn off |
 | GET | `/api/drives/{name}/nodes?parent=ID` | List a folder (with breadcrumb path) |
 | GET | `/api/drives/{name}/search?q=X` | Search names across the whole drive |
 | POST | `/api/drives/{name}/folders` | Create a folder (`"exist_ok": true` returns one already there) |
@@ -400,6 +439,9 @@ Interactive docs are served at **http://localhost:8000/api/docs**.
 
 Drive routes answer 401 with `"locked": "vault"` or `"locked": "drive"` to
 say which password is needed.
+
+WebDAV itself is served at `/dav/{name}/`, outside `/api`, with HTTP Basic
+auth (see [Mounting a drive](#mounting-a-drive-webdav)).
 
 </details>
 

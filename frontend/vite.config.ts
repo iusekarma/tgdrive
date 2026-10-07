@@ -7,6 +7,6 @@ export default defineConfig({
   server: {
     // In development the UI runs on :5173 and forwards API calls to FastAPI,
     // so the session cookie stays same-origin.
-    proxy: { "/api": "http://localhost:8000" },
+    proxy: { "/api": "http://localhost:8000", "/dav": "http://localhost:8000" },
   },
 });

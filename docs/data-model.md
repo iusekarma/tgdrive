@@ -36,6 +36,12 @@ erDiagram
         INTEGER created_at
         BLOB info_enc "file details as JSON, sealed with the file key; NULL if none"
     }
+    webdav {
+        TEXT drive_id PK,FK
+        INTEGER read_only "bound into the key's AAD"
+        BLOB wrapped_key "drive master key under the WebDAV password"
+        INTEGER created_at
+    }
     chunks {
         TEXT node_id PK,FK
         INTEGER idx PK
@@ -45,6 +51,7 @@ erDiagram
         INTEGER size "plaintext bytes"
     }
     drives ||--o{ nodes : "ON DELETE CASCADE"
+    drives ||--o| webdav : "ON DELETE CASCADE"
     nodes ||--o{ nodes : "parent_id, CASCADE"
     nodes ||--o{ chunks : "ON DELETE CASCADE"
 ```
@@ -77,6 +84,11 @@ Name uniqueness within a folder is enforced in Python
 (`Storage._check_target`) by decrypting the folder's names, since equal
 names encrypt to different ciphertexts. Nodes in state `uploading` count, so
 two uploads cannot claim the same name.
+
+**`webdav`** has a row for each drive that can be mounted over WebDAV. Its
+`wrapped_key` opens the drive with the WebDAV password alone (see
+[crypto.md](crypto.md#webdav-passwords)). Turning WebDAV off deletes the row;
+a new password replaces it.
 
 **`chunks`** maps a file to its Telegram messages. Chunk `idx` holds
 plaintext bytes `[idx * chunk_size, idx * chunk_size + size)`. `chunk_size`

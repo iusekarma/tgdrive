@@ -13,6 +13,9 @@ flowchart TD
     server --> config
     server --> httprange
     server --> thumbs
+    server --> webdav
+    webdav --> storage
+    webdav --> httprange
     cli --> storage
     cli --> config
     sessions --> crypto
@@ -37,6 +40,7 @@ flowchart TD
 - [thumbs.py](#thumbspy)
 - [httprange.py](#httprangepy)
 - [server.py](#serverpy)
+- [webdav.py](#webdavpy)
 - [cli.py](#clipy)
 - [tests/](#tests)
 
@@ -116,6 +120,9 @@ transport and the thumbnail cache. It knows nothing about HTTP.
 | `unlock_with_recovery(name, key)` | Opens a drive with its recovery key |
 | `set_password(vault, drive, new or None)` | Adds, changes or removes a drive password by re-wrapping the master key. Creates a recovery key the first time a drive gets a password |
 | `rename_drive`, `detach_drive`, `delete_drive` | Rename is a label change only: every key is bound to the drive's id, not its name |
+| `enable_webdav(drive, read_only)` | Wraps the master key under a new random WebDAV password (replacing any old one) and returns it, once |
+| `webdav_access(name)`, `disable_webdav(name)` | Whether WebDAV is on, and how; turning it off needs no key |
+| `open_webdav(name, password)` | Opens the drive with its WebDAV password alone; returns the drive and whether it is read-only |
 
 Argon2id calls go through `_kdf()`, which runs them in a thread under a
 semaphore of 2.
@@ -443,6 +450,38 @@ Two route details worth knowing:
 
 ---
 
+## webdav.py
+
+WebDAV at `/dav/<drive>/` (outside `/api`), for mounting a drive as a
+network drive. An `APIRouter` included before the web UI's catch-all route.
+
+- **Sign-in**: HTTP Basic, any user name, the drive's WebDAV password,
+  checked by `Storage.open_webdav()` on every request (an HKDF and one
+  AES-GCM open, so no session is kept). Wrong passwords go through the
+  same `LoginThrottle` as the web UI, keyed by drive and client IP. A
+  missing drive, WebDAV being off and a wrong password all answer the same
+  401. `OPTIONS` is answered without signing in, as clients probe first.
+- **Paths** are walked a segment at a time with `Storage.find()`, which
+  decrypts each folder's names; there are no ids in WebDAV URLs.
+- **Methods**: `PROPFIND` (depth 0 or 1; `infinity` is answered as 1, and
+  every property is always sent), `GET`/`HEAD` with `Range`, `PUT`,
+  `DELETE`, `MKCOL`, `COPY`, `MOVE`, plus `LOCK`/`UNLOCK`, which Finder
+  and Windows need before they will write. Locks are granted but not
+  enforced. `PROPPATCH` answers 207 and stores nothing. A read-only
+  password gets 403 for every method that writes.
+- **Replacing a file** (`PUT` over an existing name) uploads the new copy
+  under a temporary name (uploads in progress aren't listed), then deletes
+  the old node and renames the new one with no `await` in between, so
+  other requests never see the name missing or doubled.
+- **`MOVE`** uses `Storage.relocate()`, which moves and renames in one
+  update. **`COPY`** re-uploads: each file has its own key, so chunks
+  can't be shared.
+- **Files are always attachments**, with `Content-Security-Policy:
+  sandbox`, so nothing stored can run script on this origin. A folder
+  `GET` returns a plain HTML listing for browsers, sandboxed the same way.
+
+---
+
 ## cli.py
 
 `python -m app.cli <command>` works on the same database and transport as
@@ -465,4 +504,5 @@ runs against `LocalTransport` in a temporary folder.
 | `test_core.py` | Crypto round trips and tamper detection, chunking, upload/download, ranges, the chunk cache, snapshot and restore |
 | `test_vault.py` | Vault setup, unlock and recovery; open vs password drives; legacy drive migration; bulk move/delete; Telegram `deleteMessages` batching (with a fake); thumbnail encoding; search ranking |
 | `test_services.py` | `Storage` API surface, resumable uploads (including a flaky transport), the shared `Sessions` and its idle expiry, `UploadQueue`, `LoginThrottle`, Range parsing, `BackupScheduler` |
+| `test_webdav.py` | WebDAV end to end: turning it on and off, new passwords, sign-in and throttling, files and folders (PUT, overwrite, ranges, COPY, MOVE, DELETE), locks, PROPPATCH, read-only access and its binding to the key |
 | `test_api.py` | The HTTP API end to end with FastAPI's `TestClient`: files and folders, locking, cookies and errors, drive passwords, rename, resumable upload, thumbnails, search, admin-password setup, static UI serving |

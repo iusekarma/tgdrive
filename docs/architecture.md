@@ -163,14 +163,14 @@ also serves the built frontend:
 
 - `/assets/*` (Vite output with content hashes) is cached for a year as
   `immutable`.
-- Any other non-`/api` path returns `index.html`, so client-side routes such
+- Any other path outside `/api` and `/dav` returns `index.html`, so client-side routes such
   as `/d/Photos/<folder-id>` survive a reload.
 - `index.html` is sent with a strict Content-Security-Policy: scripts only
   from the same origin, no inline script, `blob:` allowed only for images
   and media (decrypted thumbnails and previews), `frame-ancestors 'none'`.
 
-In development, Vite serves the UI on port 5173 and proxies `/api` to
-FastAPI on 8000, so cookies stay same-origin.
+In development, Vite serves the UI on port 5173 and proxies `/api` and
+`/dav` to FastAPI on 8000, so cookies stay same-origin.
 
 ## Deployment
 

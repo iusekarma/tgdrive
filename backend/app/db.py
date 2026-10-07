@@ -48,6 +48,14 @@ CREATE TABLE IF NOT EXISTS nodes (
 );
 CREATE INDEX IF NOT EXISTS nodes_by_parent ON nodes(drive_id, parent_id);
 
+-- At most one WebDAV password per drive; wrapped_key is the drive's master key under it.
+CREATE TABLE IF NOT EXISTS webdav (
+    drive_id    TEXT PRIMARY KEY REFERENCES drives(id) ON DELETE CASCADE,
+    read_only   INTEGER NOT NULL,
+    wrapped_key BLOB NOT NULL,
+    created_at  INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS chunks (
     node_id    TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
     idx        INTEGER NOT NULL,

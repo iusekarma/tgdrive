@@ -11,6 +11,7 @@ import {
   KeyRound,
   Lock,
   LockOpen,
+  Network,
   PanelRight,
   Pencil,
   Search,
@@ -28,6 +29,7 @@ import {
   DrivePasswordDialog,
   RecoveryKeyDialog,
   RenameDriveDialog,
+  WebDavDialog,
   type PasswordAction,
 } from "../components/driveDialogs";
 import { DetailsDialog, DetailsPanel, KindIcon } from "../components/details";
@@ -50,6 +52,7 @@ type Open =
   | { type: "recoveryKey"; recoveryKey: string }
   | { type: "renameDrive" }
   | { type: "deleteDrive" }
+  | { type: "webdav" }
   | null;
 
 function EntryIcon({ entry, size = 20 }: { entry: Entry; size?: number }) {
@@ -473,6 +476,10 @@ export default function BrowserPage() {
                 <MenuItem onSelect={pick({ type: "renameDrive" })}>
                   <Pencil size={16} />
                   Rename drive
+                </MenuItem>
+                <MenuItem onSelect={pick({ type: "webdav" })}>
+                  <Network size={16} />
+                  WebDAV access
                 </MenuItem>
                 <MenuItem danger onSelect={pick({ type: "deleteDrive" })}>
                   <Trash2 size={16} />
@@ -916,6 +923,14 @@ export default function BrowserPage() {
             navigate(`${driveUrl(name, parent)}${location.search}`, { replace: true });
             close();
           }}
+        />
+      )}
+      {open?.type === "webdav" && (
+        <WebDavDialog
+          drive={drive}
+          isProtected={info?.protected ?? true}
+          onClose={close}
+          onChanged={() => void queryClient.invalidateQueries({ queryKey: ["drives"] })}
         />
       )}
       {open?.type === "deleteDrive" && (

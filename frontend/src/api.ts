@@ -1,5 +1,7 @@
 export type VaultStatus = { initialized: boolean; unlocked: boolean; setup_needs_admin: boolean };
-export type DriveInfo = { name: string; protected: boolean; unlocked: boolean };
+export type DriveInfo = { name: string; protected: boolean; unlocked: boolean; webdav: boolean };
+/** Whether a drive can be mounted over WebDAV, at `path` on this server. */
+export type WebDavStatus = { enabled: boolean; read_only: boolean; created_at: number | null; path: string };
 export type Entry = {
   id: string;
   kind: "file" | "dir";
@@ -175,6 +177,14 @@ export const api = {
     }),
   renameDrive: (drive: string, name: string) =>
     request<{ name: string }>("POST", `${drivePath(drive)}/rename`, { name }),
+  webdav: (drive: string) => request<WebDavStatus>("GET", `${drivePath(drive)}/webdav`),
+  /** Turns WebDAV on, or replaces its password. `password` confirms: the drive's own, or the master password. */
+  enableWebdav: (drive: string, password: string, readOnly: boolean) =>
+    request<WebDavStatus & { password: string }>("POST", `${drivePath(drive)}/webdav`, {
+      password,
+      read_only: readOnly,
+    }),
+  disableWebdav: (drive: string) => request<void>("DELETE", `${drivePath(drive)}/webdav`),
   deleteDrive: (drive: string, password: string) => request<void>("POST", `${drivePath(drive)}/delete`, { password }),
   logout: () => request<void>("POST", "/logout"),
 
