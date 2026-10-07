@@ -11,7 +11,7 @@ const PARALLEL = 3;
 /** Whether asking the server for a thumbnail can succeed. */
 export function hasThumbnail(entry: Entry): boolean {
   if (entry.kind !== "file") return false;
-  return entry.thumb || (previewKind(entry.name) === "image" && entry.size <= SERVER_SOURCE_MAX);
+  return entry.thumb || (previewKind(entry.name, entry.size) === "image" && entry.size <= SERVER_SOURCE_MAX);
 }
 
 // --- loading -----------------------------------------------------------------
@@ -171,7 +171,7 @@ export async function sendDetails(
   id: string,
   file: File,
 ): Promise<{ thumb: boolean; info: FileInfo | null }> {
-  const kind = previewKind(file.name);
+  const kind = previewKind(file.name, file.size);
   let look: Look = { image: null, info: {} };
   try {
     if (kind === "image") look = await fromImage(file);

@@ -3,19 +3,14 @@ import {
   ArrowLeft,
   ChevronRight,
   Download,
-  File as FileIcon,
-  FileText,
-  Film,
   Folder,
   FolderInput,
   FolderPlus,
   FolderUp,
-  Image as ImageIcon,
   Info,
   KeyRound,
   Lock,
   LockOpen,
-  Music,
   PanelRight,
   Pencil,
   Search,
@@ -35,9 +30,10 @@ import {
   RenameDriveDialog,
   type PasswordAction,
 } from "../components/driveDialogs";
-import { DetailsDialog, DetailsPanel } from "../components/details";
-import { DeleteNodeDialog, MoveDialog, NameDialog, PreviewDialog } from "../components/fileDialogs";
+import { DetailsDialog, DetailsPanel, KindIcon } from "../components/details";
+import { DeleteNodeDialog, MoveDialog, NameDialog } from "../components/fileDialogs";
 import Sidebar from "../components/Sidebar";
+import { Viewer } from "../components/viewer";
 import { Button, ErrorNote, ICON_BUTTON, Menu, MenuItem, PageHeader, useSavedView, ViewToggle } from "../components/ui";
 import { pickedFromInput, readDropped, useUploads, type Picked } from "../components/uploads";
 import { driveUrl, formatDate, formatSize, previewKind } from "../format";
@@ -57,11 +53,7 @@ type Open =
   | null;
 
 function EntryIcon({ entry, size = 20 }: { entry: Entry; size?: number }) {
-  if (entry.kind === "dir") return <Folder size={size} className="shrink-0 text-brass" aria-hidden="true" />;
-  const kind = previewKind(entry.name);
-  const Icon =
-    kind === "image" ? ImageIcon : kind === "video" ? Film : kind === "audio" ? Music : kind ? FileText : FileIcon;
-  return <Icon size={size} className="shrink-0 text-muted" aria-hidden="true" />;
+  return <KindIcon entry={entry} size={size} className="shrink-0" />;
 }
 
 /** Fetched when scrolled into view, a few at a time; an icon until then or if there is none. */
@@ -130,7 +122,7 @@ function Opener({
       </Link>
     );
   }
-  if (previewKind(entry.name)) {
+  if (previewKind(entry.name, entry.size)) {
     return (
       <button
         type="button"
@@ -882,7 +874,9 @@ export default function BrowserPage() {
           }}
         />
       )}
-      {open?.type === "preview" && <PreviewDialog drive={drive} entry={open.entry} onClose={close} />}
+      {open?.type === "preview" && (
+        <Viewer drive={drive} entries={entries} start={open.entry} locationOf={locationOf} onClose={close} />
+      )}
       {open?.type === "details" && (
         <DetailsDialog drive={drive} entry={open.entry} location={locationOf(open.entry)} onClose={close} />
       )}

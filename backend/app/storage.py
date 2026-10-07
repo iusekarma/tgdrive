@@ -8,6 +8,7 @@ import os
 import sqlite3
 import time
 import uuid
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import AsyncIterator, Callable
 
@@ -139,11 +140,17 @@ class Storage:
     Thumbnails are a cache: kept encrypted in thumb_dir on local disk, not in
     Telegram (one extra channel message per file would halve upload speed
     under Telegram's per-chat rate limit). Past thumb_cache_bytes the least
-    recently shown are evicted; images get theirs back on demand."""
+    recently shown are evicted; images get theirs back on demand.
+
+    Recently read chunks are kept in memory, still encrypted, up to
+    blob_cache_bytes (0 turns this off). Readers that ask for many small
+    ranges of one chunk (a comic's pages, a zip's index, a video player
+    seeking) then fetch it from Telegram once rather than every time."""
 
     def __init__(self, conn: sqlite3.Connection, transport: Transport,
                  chunk_size: int = CHUNK_SIZE, backup_passphrase: str | None = None,
-                 thumb_dir: str | None = None, thumb_cache_bytes: int | None = None):
+                 thumb_dir: str | None = None, thumb_cache_bytes: int | None = None,
+                 blob_cache_bytes: int = 0):
         if chunk_size + crypto.CHUNK_OVERHEAD > transport.max_blob_size:
             raise ValueError("chunk_size too large for this transport")
         self.conn = conn
@@ -164,6 +171,10 @@ class Storage:
         self._thumb_locks: dict[str, asyncio.Lock] = {}
         self._uploads: dict[str, UploadState] = {}
         self._thumb_failed: set[str] = set()
+        self.blob_cache_bytes = blob_cache_bytes
+        self._blobs: OrderedDict[tuple[str, int], bytes] = OrderedDict()
+        self._blob_total = 0
+        self._blob_fetches: dict[tuple[str, int], asyncio.Future[bytes]] = {}
 
     async def _kdf(self, fn, *args):
         async with self._kdf_gate:
@@ -685,11 +696,42 @@ class Storage:
         first = start // cs
         last = max(first, (end - 1) // cs)
         for r in rows[first:last + 1]:
-            blob = await self.transport.get(BlobRef(r["chat_id"], r["message_id"], r["file_id"]))
+            blob = await self._get_blob(BlobRef(r["chat_id"], r["message_id"], r["file_id"]))
             data = await asyncio.to_thread(
                 crypto.decrypt_chunk, file_key, node_id, r["idx"], r["idx"] == len(rows) - 1, blob)
             base = r["idx"] * cs
             yield data[max(start - base, 0):end - base]
+
+    async def _get_blob(self, ref: BlobRef) -> bytes:
+        """One chunk's encrypted blob, from memory when it was read recently.
+        Readers wanting the same blob at once share one fetch; it is shielded,
+        so one of them going away doesn't cancel it for the others."""
+        if not self.blob_cache_bytes:
+            return await self.transport.get(ref)
+        key = (ref.chat_id, ref.message_id)
+        blob = self._blobs.get(key)
+        if blob is not None:
+            self._blobs.move_to_end(key)
+            return blob
+        fetch = self._blob_fetches.get(key)
+        if fetch is None:
+            fetch = asyncio.ensure_future(self.transport.get(ref))
+            self._blob_fetches[key] = fetch
+            fetch.add_done_callback(lambda f: self._blob_fetched(key, f))
+        return await asyncio.shield(fetch)
+
+    def _blob_fetched(self, key: tuple[str, int], fetch: asyncio.Future[bytes]) -> None:
+        self._blob_fetches.pop(key, None)
+        if fetch.cancelled() or fetch.exception() is not None:
+            return  # the waiters see the error; exception() marks it as retrieved
+        blob = fetch.result()
+        if len(blob) > self.blob_cache_bytes:
+            return
+        self._blobs[key] = blob
+        self._blob_total += len(blob)
+        while self._blob_total > self.blob_cache_bytes:
+            _, old = self._blobs.popitem(last=False)
+            self._blob_total -= len(old)
 
     # --- deleting -----------------------------------------------------------
 
@@ -748,6 +790,10 @@ class Storage:
         logged, never raised."""
         if not refs:
             return
+        for ref in refs:
+            blob = self._blobs.pop((ref.chat_id, ref.message_id), None)
+            if blob is not None:
+                self._blob_total -= len(blob)
         try:
             await self.transport.delete_many(refs)
         except Exception:

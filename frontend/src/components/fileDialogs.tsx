@@ -1,11 +1,8 @@
-import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ChevronRight, Download, Folder } from "lucide-react";
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { ChevronRight, Folder } from "lucide-react";
+import { useState, type FormEvent } from "react";
 
-import { api, type Entry, type FileInfo } from "../api";
-import { seconds, useLearn } from "../fileinfo";
-import { formatSize, previewKind } from "../format";
-import { sendFrame } from "../thumbs";
+import { api, type Entry } from "../api";
 import { Button, Dialog, DialogActions, ErrorNote, Field, useSubmit } from "./ui";
 
 /** One text field and a confirm button: used for "New folder" and "Rename". */
@@ -189,135 +186,6 @@ export function MoveDialog({
         >
           {busy ? "Moving…" : `Move to ${here}`}
         </Button>
-      </DialogActions>
-    </Dialog>
-  );
-}
-
-const TEXT_PREVIEW_LIMIT = 512 * 1024;
-
-function TextPreview({ url, size }: { url: string; size: number }) {
-  const [text, setText] = useState<string | null>(null);
-  const [failed, setFailed] = useState(false);
-
-  useEffect(() => {
-    if (size === 0) {
-      setText("");
-      return;
-    }
-    const controller = new AbortController();
-    // A range request, so a huge log file doesn't get pulled in whole.
-    fetch(url, { headers: { Range: `bytes=0-${TEXT_PREVIEW_LIMIT - 1}` }, signal: controller.signal })
-      .then((res) => {
-        if (!res.ok) throw new Error(String(res.status));
-        return res.text();
-      })
-      .then(setText)
-      .catch((e: unknown) => {
-        if (!(e instanceof DOMException && e.name === "AbortError")) setFailed(true);
-      });
-    return () => controller.abort();
-  }, [url, size]);
-
-  if (failed) return <p className="text-sm text-danger">This file couldn't be loaded. Try downloading it instead.</p>;
-  if (text === null) return <p className="text-sm text-muted">Loading…</p>;
-  if (text === "") return <p className="text-sm text-muted">This file is empty.</p>;
-  return (
-    <>
-      <pre className="max-h-[65vh] overflow-auto rounded-md border border-line bg-surface p-4 text-sm leading-relaxed">
-        {text}
-      </pre>
-      {size > TEXT_PREVIEW_LIMIT && (
-        <p className="mt-2 text-sm text-muted">Showing the first 512 KB. Download the file to see the rest.</p>
-      )}
-    </>
-  );
-}
-
-/** Videos uploaded before thumbnails existed get one from the first frame
- * watched past the 2 s mark, so it isn't a black title card. */
-function VideoPreview({
-  drive,
-  entry,
-  url,
-  learn,
-}: {
-  drive: string;
-  entry: Entry;
-  url: string;
-  learn: (info: FileInfo) => void;
-}) {
-  const queryClient = useQueryClient();
-  const captured = useRef(entry.thumb);
-  return (
-    <video
-      src={url}
-      controls
-      className="max-h-[65vh] w-full rounded-md bg-black"
-      onLoadedMetadata={(e) => {
-        const video = e.currentTarget;
-        learn({
-          width: video.videoWidth || undefined,
-          height: video.videoHeight || undefined,
-          duration: seconds(video.duration),
-        });
-      }}
-      onTimeUpdate={(e) => {
-        const video = e.currentTarget;
-        if (captured.current || video.currentTime < Math.min(2, video.duration / 2)) return;
-        captured.current = true;
-        void sendFrame(drive, entry.id, video).then((sent) => {
-          if (sent) void queryClient.invalidateQueries({ queryKey: ["nodes", drive] });
-        });
-      }}
-    />
-  );
-}
-
-export function PreviewDialog({ drive, entry, onClose }: { drive: string; entry: Entry; onClose: () => void }) {
-  const kind = previewKind(entry.name);
-  const inlineUrl = api.fileUrl(drive, entry.id, true);
-  // The browser is loading the file to show it anyway, so what it finds out is kept.
-  const learn = useLearn(drive, entry.id);
-  return (
-    <Dialog title={entry.name} onClose={onClose} wide>
-      <div className="flex justify-center">
-        {kind === "image" && (
-          <img
-            src={inlineUrl}
-            alt={entry.name}
-            className="max-h-[65vh] max-w-full rounded-md"
-            onLoad={(e) => learn({ width: e.currentTarget.naturalWidth, height: e.currentTarget.naturalHeight })}
-          />
-        )}
-        {kind === "video" && <VideoPreview drive={drive} entry={entry} url={inlineUrl} learn={learn} />}
-        {kind === "audio" && (
-          <audio
-            src={inlineUrl}
-            controls
-            className="w-full"
-            onLoadedMetadata={(e) => learn({ duration: seconds(e.currentTarget.duration) })}
-          />
-        )}
-        {kind === "pdf" && (
-          <iframe src={inlineUrl} title={entry.name} className="h-[65vh] w-full rounded-md border border-line" />
-        )}
-        {kind === "text" && (
-          <div className="w-full">
-            <TextPreview url={api.fileUrl(drive, entry.id)} size={entry.size} />
-          </div>
-        )}
-      </div>
-      <DialogActions>
-        <span className="mr-auto self-center text-sm text-muted">{formatSize(entry.size)}</span>
-        <a
-          href={api.fileUrl(drive, entry.id)}
-          download={entry.name}
-          className="inline-flex items-center gap-2 rounded-md bg-teal px-3.5 py-2 text-sm font-medium text-teal-ink hover:brightness-110"
-        >
-          <Download size={16} />
-          Download
-        </a>
       </DialogActions>
     </Dialog>
   );

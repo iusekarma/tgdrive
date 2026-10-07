@@ -1,18 +1,39 @@
-import { File as FileIcon, FileText, Film, Folder, Image as ImageIcon, Music, X } from "lucide-react";
+import {
+  BookOpen,
+  File as FileIcon,
+  FileArchive,
+  FileText,
+  Film,
+  Folder,
+  Image as ImageIcon,
+  Music,
+  X,
+  type LucideIcon,
+} from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 
 import { type Entry } from "../api";
 import { useFileInfo } from "../fileinfo";
-import { formatDateTime, formatLength, formatSize, previewKind, typeName } from "../format";
+import { formatDateTime, formatLength, formatSize, previewKind, typeName, type PreviewKind } from "../format";
 import { cachedThumbnail, hasThumbnail, loadThumbnail } from "../thumbs";
 import { Dialog, ICON_BUTTON } from "./ui";
 
-function KindIcon({ entry, size }: { entry: Entry; size: number }) {
-  if (entry.kind === "dir") return <Folder size={size} className="text-brass" aria-hidden="true" />;
-  const kind = previewKind(entry.name);
-  const Icon =
-    kind === "image" ? ImageIcon : kind === "video" ? Film : kind === "audio" ? Music : kind ? FileText : FileIcon;
-  return <Icon size={size} className="text-muted" aria-hidden="true" />;
+const KIND_ICONS: Record<PreviewKind, LucideIcon> = {
+  image: ImageIcon,
+  video: Film,
+  audio: Music,
+  pdf: FileText,
+  text: FileText,
+  archive: FileArchive,
+  comic: BookOpen,
+};
+
+/** The icon for a folder, or for a file by what the viewer would make of it. */
+export function KindIcon({ entry, size, className = "" }: { entry: Entry; size: number; className?: string }) {
+  if (entry.kind === "dir") return <Folder size={size} className={`text-brass ${className}`} aria-hidden="true" />;
+  const kind = previewKind(entry.name, entry.size);
+  const Icon = kind ? KIND_ICONS[kind] : FileIcon;
+  return <Icon size={size} className={`text-muted ${className}`} aria-hidden="true" />;
 }
 
 /** The thumbnail the listing already loaded, or an icon. */
@@ -52,7 +73,7 @@ const takenAt = (taken: string) => formatDateTime(new Date(taken.replace(" ", "T
  * database; the file itself is never fetched to fill them in. */
 export function EntryDetails({ drive, entry, location }: { drive: string; entry: Entry; location: string }) {
   const info = useFileInfo(drive, entry).data;
-  const kind = entry.kind === "file" ? previewKind(entry.name) : null;
+  const kind = entry.kind === "file" ? previewKind(entry.name, entry.size) : null;
   const media = kind === "image" || kind === "video" || kind === "audio";
   const shape = kind === "audio" ? info?.duration : kind === "image" ? info?.width : info?.width && info.duration;
   return (
@@ -60,7 +81,7 @@ export function EntryDetails({ drive, entry, location }: { drive: string; entry:
       <Picture drive={drive} entry={entry} />
       <h3 className="mt-3 break-words font-medium">{entry.name}</h3>
       <dl className="mt-2 text-sm">
-        <Row label="Type">{entry.kind === "dir" ? "Folder" : typeName(entry.name)}</Row>
+        <Row label="Type">{entry.kind === "dir" ? "Folder" : typeName(entry.name, entry.size)}</Row>
         {entry.kind === "file" && (
           <Row label="Size">
             {formatSize(entry.size)}

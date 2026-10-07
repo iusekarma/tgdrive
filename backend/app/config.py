@@ -21,6 +21,7 @@ class Config:
     admin_password: str | None = None
     thumb_dir: str | None = None
     thumb_cache_mb: int = 512           # 0 means no limit
+    chunk_cache_mb: int = 64            # recently read chunks, kept encrypted in memory; 0 turns it off
     static_dir: str | None = None       # the built web UI, served at / when set
 
     @classmethod
@@ -40,6 +41,7 @@ class Config:
             admin_password=os.environ.get("TGDRIVE_ADMIN_PASSWORD") or None,
             thumb_dir=os.path.join(os.environ.get("TGDRIVE_CACHE_DIR", "./cache"), "thumbs"),
             thumb_cache_mb=int(os.environ.get("TGDRIVE_THUMB_CACHE_MB", "512")),
+            chunk_cache_mb=int(os.environ.get("TGDRIVE_CHUNK_CACHE_MB", "64")),
             static_dir=os.environ.get("TGDRIVE_STATIC_DIR") or None,
         )
 

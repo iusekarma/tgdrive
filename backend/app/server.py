@@ -756,7 +756,8 @@ async def lifespan(app: FastAPI):
 
     store = Storage(db.connect(cfg.db_path), transport, chunk_size=cfg.chunk_size,
                     backup_passphrase=cfg.backup_passphrase, thumb_dir=cfg.thumb_dir,
-                    thumb_cache_bytes=cfg.thumb_cache_mb * 1024 * 1024 if cfg.thumb_cache_mb else None)
+                    thumb_cache_bytes=cfg.thumb_cache_mb * 1024 * 1024 if cfg.thumb_cache_mb else None,
+                    blob_cache_bytes=cfg.chunk_cache_mb * 1024 * 1024)
     removed = await store.cleanup_incomplete()
     if removed:
         log.info("removed %d interrupted upload(s)", removed)

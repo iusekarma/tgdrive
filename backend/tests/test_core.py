@@ -1,3 +1,4 @@
+import asyncio
 import os
 import tempfile
 from pathlib import Path
@@ -96,6 +97,38 @@ class CoreTest(unittest.IsolatedAsyncioTestCase):
             self.store.conn.execute("DELETE FROM chunks WHERE node_id = ? AND idx = 2", (nid,))
         with self.assertRaises(StorageError):
             await read(self.store, self.drive, nid)
+
+    async def test_chunk_cache(self):
+        self.store.blob_cache_bytes = 2 * (CHUNK + crypto.CHUNK_OVERHEAD)
+        gets = []
+        real_get = self.transport.get
+
+        async def counting_get(ref):
+            gets.append(ref.message_id)
+            await asyncio.sleep(0.01)
+            return await real_get(ref)
+
+        self.transport.get = counting_get
+        data = os.urandom(3 * CHUNK)
+        nid = await self.store.upload(self.drive, None, "comic.cbz", gen(data))
+
+        async def part(start, end):
+            return b"".join([c async for c in self.store.download(self.drive, nid, start, end)])
+
+        # Many small reads of one chunk, some at once, fetch it once.
+        results = await asyncio.gather(*(part(i * 100, i * 100 + 50) for i in range(5)))
+        self.assertEqual(results, [data[i * 100:i * 100 + 50] for i in range(5)])
+        self.assertEqual(await part(900, 1000), data[900:1000])
+        self.assertEqual(len(gets), 1)
+
+        # Only two chunks fit: reading all three evicts the oldest.
+        self.assertEqual(await read(self.store, self.drive, nid), data)
+        self.assertEqual(len(gets), 3)
+        await part(0, 10)
+        self.assertEqual(len(gets), 4)
+
+        await self.store.delete(self.drive, nid)
+        self.assertEqual((len(self.store._blobs), self.store._blob_total), (0, 0))
 
     async def test_folders_and_delete(self):
         d = self.store.mkdir(self.drive, None, "docs")

@@ -8,7 +8,7 @@ preview and search them, all behind one master password. Each drive can also
 have a password of its own.
 
 - End-to-end encrypted: Telegram only ever sees encrypted chunks
-- Web UI with folders (upload whole folders), uploads that resume after a dropped connection, search, image and video thumbnails, previews, and range downloads (video seeking)
+- Web UI with folders (upload whole folders), uploads that resume after a dropped connection, search, image and video thumbnails, a full-window viewer (images, video including MPEG-TS, audio, PDF, text, zip contents, CBZ comics read a page at a time), and range downloads (video seeking)
 - Several drives, each optionally protected by its own password
 - Recovery keys for every password
 - The database is backed up to the channel automatically, so a lost server is not a lost drive
@@ -296,6 +296,7 @@ All settings go in `backend/.env` (see [backend/.env.example](backend/.env.examp
 | `TGDRIVE_COOKIE_SECURE` | `false` | Set to `true` when serving over HTTPS |
 | `TGDRIVE_SESSION_IDLE_MINUTES` | `30` | Idle time before a session's drives lock |
 | `TGDRIVE_THUMB_CACHE_MB` | `512` | Size limit of the thumbnail cache; `0` for no limit |
+| `TGDRIVE_CHUNK_CACHE_MB` | `64` | Recently read chunks kept in memory, still encrypted, so many small range reads of one chunk fetch it from Telegram once; `0` turns it off |
 | `TGDRIVE_BACKUP_DEBOUNCE_SECONDS` | `30` | Delay between a change and its backup |
 | `TGDRIVE_CHUNK_SIZE` | `16777216` | Chunk size in bytes (16 MB) |
 | `TGDRIVE_TRANSPORT` | `telegram` | `local` stores chunks on disk instead, for trying tgdrive without Telegram |

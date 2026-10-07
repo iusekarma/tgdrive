@@ -9,6 +9,7 @@ Source in [frontend/src](../frontend/src).
 | `react-router-dom` | Routes `/`, `/d/:drive`, `/d/:drive/:folderId` |
 | `lucide-react` | Icons |
 | `@fontsource-variable/bricolage-grotesque` | The UI font, bundled (the CSP allows no third-party origins) |
+| `mpegts.js` | Plays `.ts`/`.m2ts` video through Media Source; loaded only when one is opened |
 
 The browser never holds a key. It sends passwords to the server, gets a
 session cookie back, and from then on sees only decrypted names and file
@@ -25,10 +26,11 @@ flowchart TD
     VG -->|"/d/:drive[/:folderId]"| BP["BrowserPage"]
     DP --> DD["driveDialogs.tsx<br/>Unlock · Create · Rename · Password ·<br/>MasterPassword · Delete · RecoveryKey"]
     BP --> SB["Sidebar<br/>drives + folder tree"]
-    BP --> FD["fileDialogs.tsx<br/>Name · Delete · Move · Preview"]
+    BP --> FD["fileDialogs.tsx<br/>Name · Delete · Move"]
+    BP --> VW["viewer.tsx<br/>full-window viewer"]
     BP --> TH["thumbs.ts"]
     UP --> TH
-    DP & BP & SB & FD & DD & VG & UP --> API["api.ts"]
+    DP & BP & SB & FD & VW & DD & VG & UP --> API["api.ts"]
     DP & BP & FD & DD & VG --> UI["ui.tsx primitives"]
 ```
 
@@ -47,6 +49,8 @@ invalidation refreshes everything affected:
 | `["nodes", drive, parent]` | One folder listing | Any change in that drive (`["nodes", drive]` prefix) |
 | `["nodes", drive, "search", q]` | Search results | Same prefix, so results refresh with the folder |
 | `["info", drive, id]` | A file's details | Never refetched (`staleTime: Infinity`); updated in place by whatever learns more |
+| `["zip", drive, id]` | A zip's entry list | Never refetched; dropped with everything else when the vault locks |
+| `["comicPage", drive, id, path]` | One decompressed comic page | Garbage-collected 30 s after it leaves the screen |
 
 Queries do not retry 4xx answers (a locked drive won't unlock itself) and
 are fresh for 5 s.
@@ -211,8 +215,9 @@ date taken and camera from the first 256 KB of a local JPEG.
 
 Formatting and shared constants: `formatSize`, `formatDate`,
 `formatDuration`, `formatLength` (media length), `formatDateTime`,
-`typeName(name)` ("JPEG image"), `previewKind(name)` (image, video, audio, pdf, text or
-none, by extension), `PASSWORD_MIN = 8`, `DRIVE_NAME` (same pattern as the
+`typeName(name, size)` ("JPEG image"), `previewKind(name, size)` (image, video, audio, pdf, text,
+archive, comic or none, by extension; `.ts` over 1 MiB counts as video, smaller as TypeScript),
+`isTransportStream(name)`,  `PASSWORD_MIN = 8`, `DRIVE_NAME` (same pattern as the
 server), and `driveUrl(drive, folderId)`.
 
 ## pages/DrivesPage.tsx
@@ -243,7 +248,7 @@ The file browser for one drive and folder.
   many), delete (one or many), download, preview, lock drive.
 - **Drag and drop**: files and folders dropped anywhere on the page go to
   `uploads.enqueue` for the current folder.
-- **Opening**: folders navigate; previewable files open `PreviewDialog`;
+- **Opening**: folders navigate; previewable files open the `Viewer`;
   others download.
 - **Details**: each item's menu has **Details**, which opens
   `DetailsDialog`. On wide screens the panel button beside the view toggle
@@ -277,7 +282,38 @@ Clicking a locked drive goes to the drives page to unlock it.
 | `NameDialog` | New folder / rename |
 | `DeleteNodeDialog` | Confirms deleting one or many entries |
 | `MoveDialog` | Folder picker to move entries into |
-| `PreviewDialog` | Image, video, audio, PDF (iframe) or text. Uses `?inline=true`, which the server honours only for safe types. Text previews fetch the first 512 KB with a `Range` request |
+
+## components/viewer.tsx
+
+`Viewer` is a full-window `<dialog>` that steps through the previewable files
+of the listing (or search results) it was opened from.
+
+- **Header**: name, size, "3 of 12", Details toggle (`i`; the panel is
+  `EntryDetails`, remembered in `localStorage`), Download, Close (Esc).
+- **Stepping**: ← / → buttons and keys, and a horizontal swipe on touch
+  screens for images and audio. Keys are left alone while a media element
+  has focus, so its own seeking keys still work.
+- **What it shows**: images, video, audio and PDF (iframe) through
+  `?inline=true`, which the server honours only for safe types. Text fetches
+  the first 512 KB with a `Range` request. MPEG-TS video (`.ts`, `.m2ts`,
+  `.mts`) is repackaged in the browser by mpegts.js, which reads the file
+  with range requests. Files the browser can't decode say so and offer the
+  download.
+- **Zips** (`zip`, `jar`, `apk`): `listZip()` in `zip.ts` reads the
+  last 64 KiB (the end record and usually the whole central directory), and
+  the directory itself if it starts earlier; ZIP64 adds at most one more
+  read. So listing costs the server one or two chunk fetches from Telegram,
+  however large the archive. Entries are shown as folders you can step
+  into, with sizes, dates and a lock on encrypted entries.
+- **Comics** (`cbz`): the same index gives the page images (sorted by name,
+  skipping `__MACOSX` and dot files). `readZipEntry()` fetches one page with
+  one range request and inflates it with the browser's
+  `DecompressionStream("deflate-raw")`, so the file is never downloaded
+  whole. Two pages are read ahead once the current one is in. Arrow keys,
+  swipes and tapping either half of the page turn pages, and only move to
+  the next file past the last page. A slider jumps anywhere. The page
+  reached is remembered per file in `localStorage`. Page images are cached
+  as `["comicPage", drive, id, path]` for 30 s after they leave the screen.
 
 ## components/ui.tsx and LockDial.tsx
 

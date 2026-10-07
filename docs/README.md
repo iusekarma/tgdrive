@@ -59,6 +59,7 @@ tgdrive/
         ├── api.ts                  typed client for every endpoint
         ├── thumbs.ts               thumbnail loading and in-browser generation
         ├── format.ts               sizes, dates, preview types, validation constants
+        ├── zip.ts                  lists a zip and reads single entries, by range requests
         ├── pages/                  DrivesPage (drive list), BrowserPage (file browser)
-        └── components/             VaultGate, uploads, Sidebar, dialogs, UI primitives
+        └── components/             VaultGate, uploads, Sidebar, viewer, dialogs, UI primitives
 ```

@@ -197,6 +197,15 @@ the chunks overlapping the range, decrypts each in a thread, and slices
 it. This is what makes video seeking cheap: a `Range` request near the end
 of a 4 GB video fetches one 16 MiB chunk.
 
+Chunks go through `_get_blob()`, which keeps recently read blobs in memory,
+**still encrypted**, up to `TGDRIVE_CHUNK_CACHE_MB` (64 by default; `0`
+turns it off), evicting the least recently used. Readers that make many
+small range requests into one chunk (a comic's pages, a zip's index, a
+video player seeking about) fetch it from Telegram once. Requests for a
+blob already being fetched wait on that fetch (shielded, so one client
+going away doesn't cancel it for the others). Deleted files' blobs are
+dropped from it in `discard()`.
+
 ### Deleting
 
 `delete_nodes()` and `detach_drive()` call `_detach()`, which in one
@@ -453,7 +462,7 @@ runs against `LocalTransport` in a temporary folder.
 
 | File | Covers |
 |---|---|
-| `test_core.py` | Crypto round trips and tamper detection, chunking, upload/download, ranges, snapshot and restore |
+| `test_core.py` | Crypto round trips and tamper detection, chunking, upload/download, ranges, the chunk cache, snapshot and restore |
 | `test_vault.py` | Vault setup, unlock and recovery; open vs password drives; legacy drive migration; bulk move/delete; Telegram `deleteMessages` batching (with a fake); thumbnail encoding; search ranking |
 | `test_services.py` | `Storage` API surface, resumable uploads (including a flaky transport), the shared `Sessions` and its idle expiry, `UploadQueue`, `LoginThrottle`, Range parsing, `BackupScheduler` |
 | `test_api.py` | The HTTP API end to end with FastAPI's `TestClient`: files and folders, locking, cookies and errors, drive passwords, rename, resumable upload, thumbnails, search, admin-password setup, static UI serving |
