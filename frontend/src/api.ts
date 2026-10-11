@@ -228,6 +228,11 @@ export const api = {
 
   fileUrl: (drive: string, id: string, inline = false) =>
     `/api${drivePath(drive)}/files/${id}${inline ? "?inline=true" : ""}`,
+  /** `length` bytes from `offset`, served as a file called `name` (a file stored uncompressed in a zip). */
+  fileSliceUrl: (drive: string, id: string, offset: number, length: number, name: string) =>
+    `/api${drivePath(drive)}/files/${id}?${new URLSearchParams({
+      inline: "true", offset: String(offset), length: String(length), filename: name,
+    })}`,
   /** Read from the database only: never makes the server fetch the file. */
   fileInfo: (drive: string, id: string) => request<FileInfo>("GET", `${drivePath(drive)}/files/${id}/info`),
   /** Merges what is sent into what is known and returns it all. */

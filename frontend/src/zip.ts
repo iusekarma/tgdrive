@@ -29,13 +29,32 @@ const DIRECTORY_MAX = 64 * 1024 * 1024;
 
 export class ZipError extends Error {}
 
-async function readRange(url: string, start: number, end: number, signal?: AbortSignal): Promise<DataView<ArrayBuffer>> {
+async function readRange(
+  url: string,
+  start: number,
+  end: number,
+  signal?: AbortSignal,
+  onProgress?: (loaded: number) => void,
+): Promise<DataView<ArrayBuffer>> {
   const res = await fetch(url, { headers: { Range: `bytes=${start}-${end - 1}` }, signal });
   if (!res.ok) throw new Error(`The file couldn't be read (${res.status}).`);
-  const buf = await res.arrayBuffer();
+  const buf = onProgress && res.body ? await readCounting(res.body, onProgress) : await res.arrayBuffer();
   // A server that ignores Range sends everything; refuse rather than misread it.
   if (res.status !== 206 && !(start === 0 && buf.byteLength === end)) throw new Error("The server ignored the range.");
   return new DataView(buf);
+}
+
+async function readCounting(body: ReadableStream<Uint8Array>, onProgress: (loaded: number) => void) {
+  const parts: Uint8Array[] = [];
+  let loaded = 0;
+  for (const reader = body.getReader(); ; ) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    parts.push(value);
+    loaded += value.byteLength;
+    onProgress(loaded);
+  }
+  return new Blob(parts as BlobPart[]).arrayBuffer();
 }
 
 const u64 = (v: DataView, at: number) => Number(v.getBigUint64(at, true));
@@ -153,25 +172,39 @@ export async function listZip(url: string, size: number, signal?: AbortSignal): 
 /** Room for the local header's name and extra field, which can differ from the central copy. */
 const LOCAL_SLACK = 1024;
 
+function checkReadable(entry: ZipEntry) {
+  if (entry.encrypted) throw new ZipError("This file is password protected.");
+  if (entry.method !== 0 && entry.method !== 8) throw new ZipError("This file is compressed in a way the browser can't read.");
+}
+
+/** Where the entry's data starts in the zip, from its local header: one small
+ * range request. A stored (uncompressed) entry is then just a slice of the zip. */
+export async function zipEntryStart(url: string, entry: ZipEntry, signal?: AbortSignal): Promise<number> {
+  checkReadable(entry);
+  const v = await readRange(url, entry.offset, entry.offset + 30, signal);
+  if (v.byteLength < 30 || v.getUint32(0, true) !== LOCAL) throw new ZipError("The archive is damaged.");
+  return entry.offset + 30 + v.getUint16(26, true) + v.getUint16(28, true);
+}
+
 /** One file from the zip, decompressed: one range request (two if its local
  * header is unusually long). Stored and deflated entries only, the two that
- * comic and photo archives use. */
+ * comic and photo archives use. `onProgress` gets the bytes read so far. */
 export async function readZipEntry(
   url: string,
   size: number,
   entry: ZipEntry,
   type = "",
   signal?: AbortSignal,
+  onProgress?: (loaded: number) => void,
 ): Promise<Blob> {
-  if (entry.encrypted) throw new ZipError("This page is password protected.");
-  if (entry.method !== 0 && entry.method !== 8) throw new ZipError("This page is compressed in a way the browser can't read.");
+  checkReadable(entry);
   const guess = Math.min(size, entry.offset + 30 + LOCAL_SLACK + entry.compressed);
-  let v = await readRange(url, entry.offset, guess, signal);
+  let v = await readRange(url, entry.offset, guess, signal, onProgress);
   if (v.byteLength < 30 || v.getUint32(0, true) !== LOCAL) throw new ZipError("The archive is damaged.");
   const dataStart = 30 + v.getUint16(26, true) + v.getUint16(28, true);
   if (dataStart + entry.compressed > v.byteLength) {
     const from = entry.offset + dataStart;
-    v = await readRange(url, from, from + entry.compressed, signal);
+    v = await readRange(url, from, from + entry.compressed, signal, onProgress);
   } else {
     v = new DataView(v.buffer, v.byteOffset + dataStart, entry.compressed);
   }

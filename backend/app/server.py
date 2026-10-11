@@ -650,31 +650,43 @@ async def leave_uploads(body: QueueLeave, request: Request, session: Session = D
 
 @router.get("/drives/{name}/files/{node_id}")
 async def download_file(node_id: str, request: Request, inline: bool = False,
+                        offset: Annotated[int | None, Query(ge=0)] = None,
+                        length: Annotated[int | None, Query(ge=0)] = None,
+                        filename: Annotated[str | None, Query(min_length=1, max_length=1024)] = None,
                         drive: Drive = Depends(unlocked_drive), store: Storage = Depends(get_store)):
+    """`offset`, `length` and `filename` serve part of the file as a file of its
+    own (a file stored uncompressed inside a zip), ranges and all, so a video
+    in an archive can be played and seeked without unpacking it."""
     entry = store.stat(drive, node_id)
     if entry.kind != "file":
         raise HTTPException(400, "not a file")
+    base, size, shown_name = 0, entry.size, entry.name
+    if offset is not None or length is not None:
+        if offset is None or length is None or offset + length > entry.size:
+            raise HTTPException(400, "offset and length must both be given, within the file")
+        base, size = offset, length
+        shown_name = filename or shown_name
     try:
-        rng = parse_range(request.headers.get("range"), entry.size)
+        rng = parse_range(request.headers.get("range"), size)
     except RangeNotSatisfiable:
-        return Response(status_code=416, headers={"Content-Range": f"bytes */{entry.size}"})
-    start, end = rng or (0, entry.size)
+        return Response(status_code=416, headers={"Content-Range": f"bytes */{size}"})
+    start, end = rng or (0, size)
 
-    media = mimetypes.guess_type(entry.name)[0] or "application/octet-stream"
+    media = mimetypes.guess_type(shown_name)[0] or "application/octet-stream"
     show = inline and (media in INLINE_TYPES or media.startswith(("video/", "audio/")))
     headers = {
         "Accept-Ranges": "bytes",
         "Content-Length": str(end - start),
-        "Content-Disposition": f"{'inline' if show else 'attachment'}; filename*=UTF-8''{quote(entry.name)}",
+        "Content-Disposition": f"{'inline' if show else 'attachment'}; filename*=UTF-8''{quote(shown_name)}",
         "X-Content-Type-Options": "nosniff",
         "Cache-Control": "private, no-store",
     }
     if rng:
-        headers["Content-Range"] = f"bytes {start}-{end - 1}/{entry.size}"
+        headers["Content-Range"] = f"bytes {start}-{end - 1}/{size}"
 
     # Pull the first piece before committing to a status line, so a missing
     # or corrupted chunk becomes a real error response, not a cut-off 200.
-    stream = store.download(drive, node_id, start, end)
+    stream = store.download(drive, node_id, base + start, base + end)
     try:
         first = await anext(stream)
     except StopAsyncIteration:

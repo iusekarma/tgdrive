@@ -66,6 +66,18 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(c.get(url, headers={"Range": "bytes=9999-"}).status_code, 416)
         self.assertTrue(c.get(url, params={"inline": "true"}).headers["content-disposition"].startswith("inline"))
 
+        # A slice served as a file of its own, named for its type.
+        part = {"offset": 1000, "length": 2000, "filename": "clip.mp4", "inline": "true"}
+        r = c.get(url, params=part)
+        self.assertEqual((r.status_code, r.content, r.headers["content-type"]), (200, data[1000:3000], "video/mp4"))
+        self.assertTrue(r.headers["content-disposition"].startswith("inline"))
+        r = c.get(url, params=part, headers={"Range": "bytes=100-199"})
+        self.assertEqual((r.status_code, r.content), (206, data[1100:1200]))
+        self.assertEqual(r.headers["content-range"], "bytes 100-199/2000")
+        self.assertEqual(c.get(url, params={**part, "filename": "x.html"}).headers["content-disposition"][:10], "attachment")
+        self.assertEqual(c.get(url, params={"offset": 4000, "length": 2000}).status_code, 400)
+        self.assertEqual(c.get(url, params={"offset": 10}).status_code, 400)
+
         r = c.put("/api/drives/main/files", params={"filename": "a.pdf", "parent": folder["id"]}, content=b"x")
         self.assertEqual(r.status_code, 409)
 

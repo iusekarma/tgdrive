@@ -51,7 +51,8 @@ invalidation refreshes everything affected:
 | `["info", drive, id]` | A file's details | Never refetched (`staleTime: Infinity`); updated in place by whatever learns more |
 | `["webdav", drive]` | `GET /drives/{name}/webdav` | Set in place when WebDAV is turned on or off |
 | `["zip", drive, id]` | A zip's entry list | Never refetched; dropped with everything else when the vault locks |
-| `["comicPage", drive, id, path]` | One decompressed comic page | Garbage-collected 30 s after it leaves the screen |
+| `["zipPage", drive, id, path]` | One decompressed image from a comic or zip | Garbage-collected 30 s after it leaves the screen |
+| `["zipStart", drive, id, path]` | Where a stored video's data starts in its zip | Never refetched |
 
 Queries do not retry 4xx answers (a locked drive won't unlock itself) and
 are fresh for 5 s.
@@ -295,10 +296,16 @@ of the listing (or search results) it was opened from.
 - **Header**: name, size, "3 of 12", Details toggle (`i`; the panel is
   `EntryDetails`, remembered in `localStorage`), Download, Close (Esc).
 - **Stepping**: ← / → buttons and keys, and a horizontal swipe on touch
-  screens for images and audio. Keys are left alone while a media element
-  has focus, so its own seeking keys still work.
+  screens for images, audio, comics and zips. Keys are left alone while a
+  media element has focus, so its own seeking keys still work.
+- **Controls fade** (`useIdle`): the ← / → buttons and a reader's page bar
+  fade out 2.5 s after the pointer last moved, and come back when it moves
+  or is tapped. They stay while the pointer rests on one (anything marked
+  `data-control`) or one has keyboard focus.
 - **What it shows**: images, video, audio and PDF (iframe) through
-  `?inline=true`, which the server honours only for safe types. Text fetches
+  `?inline=true`, which the server honours only for safe types. The
+  `<video>` fills the stage from the start, so nothing jumps once its size
+  is known. Text fetches
   the first 512 KB with a `Range` request. MPEG-TS video (`.ts`, `.m2ts`,
   `.mts`) is repackaged in the browser by mpegts.js, which reads the file
   with range requests. Files the browser can't decode say so and offer the
@@ -308,7 +315,9 @@ of the listing (or search results) it was opened from.
   the directory itself if it starts earlier; ZIP64 adds at most one more
   read. So listing costs the server one or two chunk fetches from Telegram,
   however large the archive. Entries are shown as folders you can step
-  into, with sizes, dates and a lock on encrypted entries.
+  into, with sizes, dates and a lock on encrypted entries. If the zip holds
+  images or videos, "View N items" (or clicking one) opens them in the same
+  reader as comics. A zip always opens on its list.
 - **Comics** (`cbz`): the same index gives the page images (sorted by name,
   skipping `__MACOSX` and dot files). `readZipEntry()` fetches one page with
   one range request and inflates it with the browser's
@@ -317,7 +326,20 @@ of the listing (or search results) it was opened from.
   swipes and tapping either half of the page turn pages, and only move to
   the next file past the last page. A slider jumps anywhere. The page
   reached is remembered per file in `localStorage`. Page images are cached
-  as `["comicPage", drive, id, path]` for 30 s after they leave the screen.
+  as `["zipPage", drive, id, path]` for 30 s after they leave the screen.
+- **Reading modes** (remembered in `localStorage` as `tgdrive.readMode`):
+  one page at a time, or scrolling down through every page, with gaps or
+  without (for webtoon-style strips). Scrolling loads only the pages within
+  a screen's height of the view (`IntersectionObserver`); the rest keep the
+  shape they had, or the first known page's, and the browser's scroll
+  anchoring keeps the view still as they load. The page a third of the way
+  down the screen is the current one; ← / → jump a page.
+- **Videos in zips**: a stored (uncompressed) entry is a plain byte range
+  of the zip. `zipEntryStart()` reads its local header to find where, and
+  the video plays from `/files/{id}?offset=…&length=…&filename=…`, which
+  the server serves as a file of its own, ranges and all, so it streams and
+  seeks. A deflated entry is unpacked whole into a blob first, with
+  progress; past 256 MB, or while scrolling, only when asked.
 
 ## components/ui.tsx and LockDial.tsx
 

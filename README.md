@@ -433,7 +433,7 @@ Interactive docs are served at **http://localhost:8000/api/docs**.
 | GET · DELETE | `/api/drives/{name}/uploads/{id}` | How much is stored and what the server is doing / cancel |
 | POST | `/api/uploads/sync` | The upload line every device shares: report this tab's uploads, get everyone's |
 | POST | `/api/uploads/leave` | A closing tab leaves the upload line |
-| GET | `/api/drives/{name}/files/{id}` | Download; supports `Range` and `?inline=true` |
+| GET | `/api/drives/{name}/files/{id}` | Download; supports `Range` and `?inline=true`, and `offset`, `length`, `filename` to serve part of the file as a file of its own |
 | GET · PUT | `/api/drives/{name}/files/{id}/thumbnail` | Get or upload a 320px WebP thumbnail |
 | GET · PUT | `/api/drives/{name}/files/{id}/info` | Get or merge a file's details (dimensions, length, dates, camera) |
 
