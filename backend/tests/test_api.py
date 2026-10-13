@@ -122,9 +122,9 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(c.post("/api/drives", json={"name": "x"}).status_code, 401)
         self.assertEqual(c.post("/api/vault/setup", json={"password": "another-pw"}).status_code, 409)
         self.assertEqual(c.post("/api/vault/unlock", json={"password": "master-pw"}).status_code, 200)
-        # A second device joins the one session: the drive unlocked on the first is open here too.
+        # A second device shares the vault, but a drive with a password must be unlocked here too.
         self.assertEqual(c.get("/api/drives").json(),
-                         [{"name": "main", "protected": True, "unlocked": True, "webdav": False}])
+                         [{"name": "main", "protected": True, "unlocked": False, "webdav": False}])
         self.assertEqual(c.post("/api/drives/main/lock").status_code, 204)
         self.assertEqual(c.get("/api/drives/main/nodes").status_code, 401)
         self.assertEqual(c.post("/api/drives", json={"name": "main", "password": "password1"}).status_code, 409)
@@ -133,14 +133,17 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(c.post("/api/drives/nope/unlock", json={"password": "password1"}).status_code, 404)
 
 
-    def test_one_session_for_every_device(self):
+    def test_drives_unlock_per_device(self):
         other = TestClient(self._client.app)
         self.assertEqual(other.get("/api/drives").status_code, 401)   # a password is still needed
         self.assertEqual(other.post("/api/vault/unlock", json={"password": "master-pw"}).status_code, 200)
         self.assertNotEqual(other.cookies[COOKIE], self.c.cookies[COOKIE])
-        self.assertEqual(other.get("/api/drives/main/nodes").status_code, 200)
-        self.c.post("/api/drives/main/lock")
         self.assertEqual(other.get("/api/drives/main/nodes").json()["locked"], "drive")
+        self.assertEqual(other.post("/api/drives/main/unlock", json={"password": "password1"}).status_code, 200)
+        self.assertEqual(other.get("/api/drives/main/nodes").status_code, 200)
+        self.c.post("/api/drives/main/lock")                          # locks it only on that device
+        self.assertEqual(self.c.get("/api/drives/main/nodes").json()["locked"], "drive")
+        self.assertEqual(other.get("/api/drives/main/nodes").status_code, 200)
         other.post("/api/logout")
         self.assertEqual(self.c.get("/api/drives").json()["locked"], "vault")
 

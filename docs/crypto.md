@@ -160,8 +160,10 @@ reach it over a network.
 
 - **Sessions**: a 32-byte random token in an `HttpOnly`, `SameSite=Strict`
   cookie (`Secure` when `TGDRIVE_COOKIE_SECURE=true`), one per device. All
-  devices share one session, which expires after 30 minutes idle by
-  default; logging out ends it everywhere.
+  devices share one session and its vault key, which expires after 30
+  minutes idle by default; logging out ends it everywhere. Drives with a
+  password of their own are unlocked per device, so logging in from a new
+  device asks for each one again.
 - **Password guessing**: after 5 wrong tries from one client IP for one
   scope (the vault, or one drive), each further try must wait 1 s, 2 s,
   4 s, ... up to 60 s. Combined with Argon2id at 64 MiB, this makes online

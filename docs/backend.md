@@ -321,15 +321,17 @@ limit as Telegram, so behaviour matches.
 
 ## sessions.py
 
-- **`Session`**: `vault` (`VaultKeys` or None), `drives` (name → unlocked
-  `Drive`), `last_seen`.
-- **`Sessions`**: there is one `Session`, shared by every device. Each
-  device that logs in gets its own 32-byte URL-safe token from `create()`,
-  which joins the live session or starts one. `get(token)` returns `None`
+- **`Session`**: one device's view: `vault` (`VaultKeys` or None, shared
+  with every device) and `drives` (name → `Drive` unlocked on this device).
+- **`Sessions`**: there is one session, shared by every device. Each
+  device that logs in gets its own 32-byte URL-safe token and `Session`
+  from `create()`, which joins the live session or starts one. A drive
+  with a password must be unlocked on each device; `/drives/{name}/lock`
+  locks it only on the caller's. `get(token)` returns `None`
   for an unknown token, and ends the session for everyone once it has been
   idle longer than `idle_seconds`; otherwise it slides the timer forward.
-  `end()` logs every device out. `forget_drive(name)` re-locks a drive
-  (used after its password changes or it is deleted); `rename_drive`
+  `end()` logs every device out. `forget_drive(name)` re-locks a drive on
+  every device (used after its password changes or it is deleted); `rename_drive`
   follows a rename.
 - **`LoginThrottle`**: per `(scope, client IP)` counter. Five free wrong
   tries, then the wait doubles from 1 s up to a 60 s cap. A success clears

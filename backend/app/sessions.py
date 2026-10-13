@@ -4,65 +4,86 @@ from __future__ import annotations
 
 import secrets
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from .crypto import VaultKeys
 from .storage import Drive
 
 
 @dataclass
-class Session:
+class _Shared:
     vault: VaultKeys | None = None
-    drives: dict[str, Drive] = field(default_factory=dict)
     last_seen: float = 0.0
+
+
+class Session:
+    """One device's view of the session. The vault is shared with every
+    other device, but drives are unlocked per device: one with a password of
+    its own must be unlocked again on each device that logs in."""
+
+    def __init__(self, shared: _Shared):
+        self._shared = shared
+        self.drives: dict[str, Drive] = {}
+
+    @property
+    def vault(self) -> VaultKeys | None:
+        return self._shared.vault
+
+    @vault.setter
+    def vault(self, vault: VaultKeys | None) -> None:
+        self._shared.vault = vault
 
 
 class Sessions:
     """tgdrive has one user, so it has one session. Every device that logs
-    in joins it: each gets a token of its own, but they all see the same
-    vault and unlocked drives, and logging out or idling locks them all."""
+    in joins it: each gets a token and a `Session` of its own, sharing the
+    vault, and logging out or idling locks them all."""
 
     def __init__(self, idle_seconds: float = 1800, clock=time.monotonic):
         self.idle_seconds = idle_seconds
         self._clock = clock
-        self._session: Session | None = None
-        self._tokens: set[str] = set()
+        self._shared: _Shared | None = None
+        self._devices: dict[str, Session] = {}
 
     def create(self) -> tuple[str, Session]:
         """A token for a device that has just proved it knows a password."""
-        session = self._live()
-        if session is None:
-            session = self._session = Session(last_seen=self._clock())
+        shared = self._live()
+        if shared is None:
+            shared = self._shared = _Shared(last_seen=self._clock())
         token = secrets.token_urlsafe(32)
-        self._tokens.add(token)
+        session = self._devices[token] = Session(shared)
         return token, session
 
     def get(self, token: str | None) -> Session | None:
-        if not token or token not in self._tokens:
+        session = self._devices.get(token) if token else None
+        if session is None:
             return None
-        session = self._live()
-        if session is not None:
-            session.last_seen = self._clock()
+        shared = self._live()
+        if shared is None:
+            return None
+        shared.last_seen = self._clock()
         return session
 
     def end(self) -> None:
         """Logs every device out."""
-        self._session = None
-        self._tokens.clear()
+        self._shared = None
+        self._devices.clear()
 
     def forget_drive(self, name: str) -> None:
-        if self._session:
-            self._session.drives.pop(name, None)
+        """Locks the drive on every device."""
+        for session in self._devices.values():
+            session.drives.pop(name, None)
 
     def rename_drive(self, old: str, new: str) -> None:
-        if self._session and old in self._session.drives:
-            drive = self._session.drives[new] = self._session.drives.pop(old)
-            drive.name = new
+        for session in self._devices.values():
+            if old in session.drives:
+                drive = session.drives[new] = session.drives.pop(old)
+                drive.name = new
 
-    def _live(self) -> Session | None:
-        if self._session is not None and self._clock() - self._session.last_seen > self.idle_seconds:
+    def _live(self) -> _Shared | None:
+        if self._shared is not None and self._clock() - self._shared.last_seen > self.idle_seconds:
             self.end()
-        return self._session
+        return self._shared
 
 
 class LoginThrottle:

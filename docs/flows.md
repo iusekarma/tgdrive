@@ -83,8 +83,10 @@ sequenceDiagram
     end
 ```
 
-Every device that unlocks joins the same session, so they all see the same
-unlocked drives. After 30 idle minutes (`TGDRIVE_SESSION_IDLE_MINUTES`)
+Every device that unlocks joins the same session and shares the vault, but
+drives are unlocked per device: a drive with a password of its own asks for
+it again on each device that logs in, and locking it locks it only there.
+After 30 idle minutes (`TGDRIVE_SESSION_IDLE_MINUTES`)
 without a request from any device the session is forgotten; the next request gets `401 {locked: "vault"}` and the UI returns
 to the login screen.
 

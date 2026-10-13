@@ -48,6 +48,8 @@ export function Field({
       <input
         id={id}
         {...rest}
+        // React focuses on mount, before Dialog opens; Dialog looks for this to focus it again.
+        data-autofocus={rest.autoFocus || undefined}
         className="w-full rounded-md border border-line bg-surface px-3 py-2 text-base text-ink placeholder:text-muted focus:border-teal"
       />
       {hint && <p className="text-sm text-muted">{hint}</p>}
@@ -78,7 +80,11 @@ export function Dialog({
   const ref = useRef<HTMLDialogElement>(null);
   useEffect(() => {
     const el = ref.current;
-    if (el && !el.open) el.showModal();
+    if (el && !el.open) {
+      el.showModal();
+      // showModal() focuses the first focusable element (the close button), not the field asked for.
+      el.querySelector<HTMLElement>("[data-autofocus]")?.focus();
+    }
     return () => el?.close();
   }, []);
   return (

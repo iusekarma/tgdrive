@@ -268,22 +268,27 @@ class SessionsTest(unittest.TestCase):
         self.assertIsNone(s.get(None))
         self.assertIsNone(s.get("bogus"))
 
-    def test_every_device_shares_one_session(self):
+    def test_devices_share_the_vault_not_drives(self):
         now = [0.0]
         s = Sessions(idle_seconds=100, clock=lambda: now[0])
         t1, a = s.create()
+        a.vault = "keys"
         t2, b = s.create()
         self.assertNotEqual(t1, t2)
-        self.assertIs(a, b)
+        self.assertIsNot(a, b)
+        self.assertEqual(b.vault, "keys")
         a.drives["x"] = SimpleNamespace(name="x")
+        self.assertEqual(b.drives, {})            # unlocked on a only
+        b.drives["x"] = SimpleNamespace(name="x")
         s.rename_drive("x", "y")
+        self.assertEqual((list(a.drives), a.drives["y"].name), (["y"], "y"))
         self.assertEqual((list(b.drives), b.drives["y"].name), (["y"], "y"))
         s.forget_drive("y")
-        self.assertEqual(b.drives, {})
+        self.assertEqual((a.drives, b.drives), ({}, {}))
         now[0] = 50
         self.assertIs(s.get(t1), a)        # either device keeps it alive
         now[0] = 140
-        self.assertIs(s.get(t2), a)
+        self.assertIs(s.get(t2), b)
         s.end()
         self.assertIsNone(s.get(t1))
         self.assertIsNone(s.get(t2))

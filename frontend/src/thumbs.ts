@@ -20,6 +20,9 @@ export function hasThumbnail(entry: Entry): boolean {
 // so decrypted previews never land in the browser's disk cache.
 const cache = new Map<string, string | null>();
 const pending = new Map<string, Promise<string | null>>();
+// Thumbnails this tab is making from a just-uploaded file. Asking the server
+// meanwhile would have it fetch the whole file back from Telegram to make one.
+const making = new Map<string, Promise<void>>();
 let active = 0;
 const waiting: (() => void)[] = [];
 
@@ -41,8 +44,9 @@ export function cachedThumbnail(drive: string, id: string): string | null | unde
 }
 
 /** Resolves to an object URL, or null when there is no thumbnail. */
-export function loadThumbnail(drive: string, id: string): Promise<string | null> {
+export async function loadThumbnail(drive: string, id: string): Promise<string | null> {
   const k = key(drive, id);
+  await making.get(k);
   if (cache.has(k)) return Promise.resolve(cache.get(k) ?? null);
   let job = pending.get(k);
   if (!job) {
@@ -172,23 +176,32 @@ export async function sendDetails(
   file: File,
 ): Promise<{ thumb: boolean; info: FileInfo | null }> {
   const kind = previewKind(file.name, file.size);
+  const k = key(drive, id);
+  let made = () => {};
+  if (kind === "image" || kind === "video") making.set(k, new Promise<void>((resolve) => (made = resolve)));
   let look: Look = { image: null, info: {} };
-  try {
-    if (kind === "image") look = await fromImage(file);
-    else if (kind === "video") look = await fromVideo(file);
-    else if (kind === "audio") look = await fromAudio(file);
-  } catch {
-    // Not decodable here; the file's own date is still worth keeping.
-  }
   let thumb = false;
-  if (look.image) {
+  try {
     try {
-      await api.putThumbnail(drive, id, look.image);
-      remember(drive, id, look.image);
-      thumb = true;
+      if (kind === "image") look = await fromImage(file);
+      else if (kind === "video") look = await fromVideo(file);
+      else if (kind === "audio") look = await fromAudio(file);
     } catch {
-      /* shown as an icon */
+      // Not decodable here; the file's own date is still worth keeping.
     }
+    if (look.image) {
+      try {
+        await api.putThumbnail(drive, id, look.image);
+        remember(drive, id, look.image);
+        thumb = true;
+      } catch {
+        /* shown as an icon */
+      }
+    }
+  } finally {
+    // Without one, the server may still manage (an image this browser can't decode).
+    making.delete(k);
+    made();
   }
   const fields = { ...look.info, modified: Math.floor(file.lastModified / 1000) };
   const info = await api.putFileInfo(drive, id, fields).catch(() => null);
