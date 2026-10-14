@@ -153,8 +153,9 @@ flowchart LR
     ROW -->|last chunk| FIN["_finish():<br/>size, state = ready"]
 ```
 
-Data streams straight through: a file is never held in full or written to
-disk. Memory use per upload is about one chunk.
+Data streams straight through: a file is never held in full, and only a
+small file waiting for its pack (below) touches the disk, encrypted. Memory
+use per upload is about one chunk.
 
 There are two ways in:
 
@@ -198,13 +199,45 @@ If storing a chunk fails after the transport's own retries, `write_upload`
 raises `TransportUnavailable` (503). What was stored stays, and the client
 can resume later.
 
+### Packs: small files sharing a message
+
+Telegram limits a bot to about 20 messages a minute in one channel, however
+small they are, so a folder of small files would take one message (and
+about three seconds) each. With `TGDRIVE_PACK_SMALL_FILES` on (the default),
+a file of at most `TGDRIVE_PACK_MAX_FILE_MB` (4, capped at the chunk size)
+waits for others instead:
+
+- `_store_chunk()` sees a file's only chunk is small and hands it, already
+  encrypted, to `_wait_for_pack()`. That writes it to
+  `<database folder>/pending/<node id>.chunk` (fsynced) and the file counts
+  as stored at once, so the browser moves on to the next file.
+- `_send_pack()` sends the oldest waiting chunks that fit in one chunk's
+  worth of bytes as one message and records each one's `pack_offset` and
+  `pack_length` in `chunks`. It runs when the next file would overflow the
+  pack (in that upload's request, so Telegram's waits show on it), and
+  `TGDRIVE_PACK_WAIT_SECONDS` (5) after a pack was started otherwise, every
+  minute while the transport is down.
+- A waiting file is read from memory. Deleting one drops it from the pack.
+- `backup()` sends what is waiting first. `db.snapshot()` marks files still
+  waiting as `uploading` in the copy, so a restore elsewhere removes them
+  instead of listing files it can't read.
+- On shutdown `stop_packing()` sends what is waiting. On start
+  `resume_packs()` (after `cleanup_incomplete()`) queues whatever is left in
+  `pending/`, even with packing since turned off.
+
+Each chunk in a pack is encrypted on its own with its file's key, exactly
+as an unpacked one, so packing changes nothing about what Telegram sees
+beyond how many files share a message.
+
 ### Downloading
 
 `download(drive, id, start, end)` is an async generator over plaintext
 bytes `[start, end)`. It verifies the chunk map is complete, fetches only
 the chunks overlapping the range, decrypts each in a thread, and slices
 it. This is what makes video seeking cheap: a `Range` request near the end
-of a 4 GB video fetches one 16 MiB chunk.
+of a 4 GB video fetches one 16 MiB chunk. A packed chunk fetches its whole
+pack and slices its own bytes out; the cache below then serves the
+neighbouring files from the same fetch.
 
 Chunks go through `_get_blob()`, which keeps recently read blobs in memory,
 **still encrypted**, up to `TGDRIVE_CHUNK_CACHE_MB` (64 by default; `0`
@@ -220,8 +253,9 @@ dropped from it in `discard()`.
 `delete_nodes()` and `detach_drive()` call `_detach()`, which in one
 transaction walks each subtree with a recursive CTE, collects its chunk
 references, and deletes the top rows (children go by `ON DELETE CASCADE`).
-Then thumbnails are removed and any in-flight upload under it is marked
-`gone`. The references are returned so the caller can delete the Telegram
+A pack's message is only returned once no chunk refers to it any more, so it
+goes with the last file in it. Then thumbnails and waiting chunks are
+removed and any in-flight upload under it is marked `gone`. The references are returned so the caller can delete the Telegram
 messages; `discard()` does so with `delete_many()` and logs, never raises,
 on failure.
 
@@ -533,7 +567,7 @@ runs against `LocalTransport` in a temporary folder.
 
 | File | Covers |
 |---|---|
-| `test_core.py` | Crypto round trips and tamper detection, chunking, upload/download, ranges, the chunk cache, snapshot and restore |
+| `test_core.py` | Crypto round trips and tamper detection, chunking, upload/download, ranges, the chunk cache, snapshot and restore, packs |
 | `test_vault.py` | Vault setup, unlock and recovery; open vs password drives; legacy drive migration; bulk move/delete; Telegram `deleteMessages` batching (with a fake); thumbnail encoding; search ranking |
 | `test_services.py` | `Storage` API surface, resumable uploads (including a flaky transport), the shared `Sessions` and its idle expiry, `UploadQueue`, `LoginThrottle`, Range parsing, `BackupScheduler` |
 | `test_webdav.py` | WebDAV end to end: turning it on and off, new passwords, sign-in and throttling, files and folders (PUT, overwrite, ranges, COPY, MOVE, DELETE), locks, PROPPATCH, read-only access and its binding to the key |

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -110,6 +111,24 @@ class UploadState:
         return max(0.0, self.wait_until - time.monotonic())
 
 
+@dataclass(eq=False)
+class _Waiting:
+    """A small file's only chunk, encrypted, kept on local disk until it goes
+    out in a pack with others."""
+    node_id: str
+    size: int     # plaintext bytes
+    blob: bytes
+
+
+def _write_durably(path: str, data: bytes) -> None:
+    tmp = path + ".tmp"
+    with open(tmp, "wb") as f:
+        f.write(data)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
 def _new_id() -> str:
     return uuid.uuid4().hex
 
@@ -152,12 +171,22 @@ class Storage:
     Recently read chunks are kept in memory, still encrypted, up to
     blob_cache_bytes (0 turns this off). Readers that ask for many small
     ranges of one chunk (a comic's pages, a zip's index, a video player
-    seeking) then fetch it from Telegram once rather than every time."""
+    seeking) then fetch it from Telegram once rather than every time.
+
+    Small files can share a message (pack_max_file > 0, which needs
+    pack_dir). Telegram limits messages per minute, not bytes, so many small
+    files would otherwise take one message each. A file up to pack_max_file
+    is encrypted as usual, kept in pack_dir, and counts as stored at once;
+    the waiting files go out together when they fill a chunk, or pack_wait
+    seconds after the first of them. A pack's message is deleted with the
+    last file in it. Files still in pack_dir after a restart are sent by
+    resume_packs, even with packing since turned off."""
 
     def __init__(self, conn: sqlite3.Connection, transport: Transport,
                  chunk_size: int = CHUNK_SIZE, backup_passphrase: str | None = None,
                  thumb_dir: str | None = None, thumb_cache_bytes: int | None = None,
-                 blob_cache_bytes: int = 0):
+                 blob_cache_bytes: int = 0, pack_dir: str | None = None,
+                 pack_max_file: int = 0, pack_wait: float = 5.0):
         if chunk_size + crypto.CHUNK_OVERHEAD > transport.max_blob_size:
             raise ValueError("chunk_size too large for this transport")
         self.conn = conn
@@ -182,6 +211,17 @@ class Storage:
         self._blobs: OrderedDict[tuple[str, int], bytes] = OrderedDict()
         self._blob_total = 0
         self._blob_fetches: dict[tuple[str, int], asyncio.Future[bytes]] = {}
+        self.pack_dir = pack_dir
+        if pack_dir:
+            os.makedirs(pack_dir, exist_ok=True)
+        self.pack_max_file = min(pack_max_file, chunk_size) if pack_dir else 0
+        self.pack_wait = pack_wait
+        self._pack_limit = chunk_size + crypto.CHUNK_OVERHEAD
+        self._pack: list[_Waiting] = []           # waiting to be sent, oldest first
+        self._pack_bytes = 0
+        self._waiting: dict[str, _Waiting] = {}   # those, and any being sent right now
+        self._pack_lock = asyncio.Lock()
+        self._pack_timer: asyncio.Task | None = None
 
     async def _kdf(self, fn, *args):
         async with self._kdf_gate:
@@ -608,17 +648,154 @@ class Storage:
 
     async def _store_chunk(self, file_key: bytes, node_id: str, idx: int, final: bool, data: bytes) -> None:
         blob = await asyncio.to_thread(crypto.encrypt_chunk, file_key, node_id, idx, final, data)
+        if self.pack_max_file and idx == 0 and final and len(data) <= self.pack_max_file:
+            await self._wait_for_pack(_Waiting(node_id, len(data), blob))
+            return
         ref = await self.transport.put(blob)
         # Recorded immediately, so a crash never leaves a blob we can't find.
         with self.conn:
             self.conn.execute(
-                "INSERT INTO chunks VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO chunks (node_id, idx, chat_id, message_id, file_id, size) VALUES (?, ?, ?, ?, ?, ?)",
                 (node_id, idx, ref.chat_id, ref.message_id, ref.file_id, len(data)),
             )
 
     def _finish(self, node_id: str, size: int) -> None:
         with self.conn:
             self.conn.execute("UPDATE nodes SET size = ?, state = 'ready' WHERE id = ?", (size, node_id))
+
+    # --- packs --------------------------------------------------------------
+
+    def _waiting_path(self, node_id: str) -> str:
+        return os.path.join(self.pack_dir, f"{node_id}.chunk")
+
+    async def _wait_for_pack(self, item: _Waiting) -> None:
+        """Keeps a small file on local disk until it goes out in a pack. It
+        counts as stored from here on."""
+        if self._pack_bytes + len(item.blob) > self._pack_limit:
+            await self._send_pack()   # full: send it before starting the next
+        await asyncio.to_thread(_write_durably, self._waiting_path(item.node_id), item.blob)
+        if not self.conn.execute("SELECT 1 FROM nodes WHERE id = ?", (item.node_id,)).fetchone():
+            self._unlink_waiting(item.node_id)
+            raise sqlite3.IntegrityError("the file was deleted")   # as a chunk row for it would
+        self._pack.append(item)
+        self._pack_bytes += len(item.blob)
+        self._waiting[item.node_id] = item
+        self._arm_pack_timer()
+
+    async def _send_pack(self) -> None:
+        """Sends the oldest waiting files that fit in one message. When the
+        transport gives up, they keep waiting and this raises."""
+        async with self._pack_lock:
+            take = total = 0
+            for item in self._pack:
+                if take and total + len(item.blob) > self._pack_limit:
+                    break
+                take, total = take + 1, total + len(item.blob)
+            if not take:
+                return
+            items = self._pack[:take]
+            del self._pack[:take]
+            self._pack_bytes -= total
+            try:
+                ref = await self.transport.put(b"".join(i.blob for i in items))
+            except BaseException:
+                # Back to the front, less any deleted meanwhile.
+                self._pack[:0] = [i for i in items if self._waiting.get(i.node_id) is i]
+                self._pack_bytes = sum(len(i.blob) for i in self._pack)
+                raise
+            rows, offset = [], 0
+            for i in items:
+                if self._waiting.get(i.node_id) is i:   # not deleted while it was sent
+                    rows.append((i.node_id, 0, ref.chat_id, ref.message_id, ref.file_id, i.size,
+                                 offset, len(i.blob)))
+                offset += len(i.blob)
+            if rows:
+                with self.conn:
+                    self.conn.executemany(
+                        "INSERT INTO chunks (node_id, idx, chat_id, message_id, file_id, size, "
+                        "pack_offset, pack_length) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", rows)
+            for i in items:
+                if self._waiting.get(i.node_id) is i:
+                    del self._waiting[i.node_id]
+                self._unlink_waiting(i.node_id)
+            if rows:
+                self.on_change()
+            else:
+                await self.discard([ref])
+
+    async def flush_packs(self) -> None:
+        """Sends every file waiting now, however few; not those arriving
+        meanwhile. Raises when the transport gives up."""
+        due = {i.node_id for i in self._pack}
+        while any(i.node_id in due for i in self._pack):
+            await self._send_pack()
+
+    def _arm_pack_timer(self) -> None:
+        if self._pack_timer is None or self._pack_timer.done():
+            self._pack_timer = asyncio.create_task(self._pack_timer_loop())
+
+    async def _pack_timer_loop(self) -> None:
+        """Sends a pack that isn't full pack_wait seconds after it started,
+        and keeps trying a minute apart while the transport is down."""
+        delay = self.pack_wait
+        while self._pack:
+            await asyncio.sleep(delay)
+            try:
+                await self.flush_packs()
+                delay = self.pack_wait
+            except Exception:
+                log.warning("could not send %d small file(s); will retry", len(self._pack), exc_info=True)
+                delay = max(self.pack_wait, 60.0)
+
+    async def stop_packing(self) -> None:
+        """Before shutting down: sends what is waiting. Anything that can't be
+        sent stays in pack_dir for resume_packs."""
+        if self._pack_timer is not None:
+            self._pack_timer.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._pack_timer
+        try:
+            await self.flush_packs()
+        except Exception:
+            log.warning("%d small file(s) not sent yet; they go at the next start",
+                        len(self._pack), exc_info=True)
+
+    async def resume_packs(self) -> int:
+        """After a restart, queues the files still waiting in pack_dir. Run
+        it after cleanup_incomplete, which removes the unfinished ones."""
+        if not self.pack_dir:
+            return 0
+        found = 0
+        for name in sorted(os.listdir(self.pack_dir)):
+            node_id, ext = os.path.splitext(name)
+            row = ext == ".chunk" and self.conn.execute(
+                f"SELECT size FROM nodes WHERE id = ? AND {db.UNSENT}", (node_id,)).fetchone()
+            path = os.path.join(self.pack_dir, name)
+            if not row:
+                os.remove(path)   # deleted, sent, or a half-written .tmp
+                continue
+            with open(path, "rb") as f:
+                item = _Waiting(node_id, row["size"], f.read())
+            self._pack.append(item)
+            self._pack_bytes += len(item.blob)
+            self._waiting[node_id] = item
+            found += 1
+        if found:
+            self._arm_pack_timer()
+        return found
+
+    def _unwait(self, node_id: str) -> None:
+        item = self._waiting.pop(node_id, None)
+        if item is None:
+            return
+        if item in self._pack:   # not being sent right now
+            self._pack.remove(item)
+            self._pack_bytes -= len(item.blob)
+        self._unlink_waiting(node_id)
+
+    def _unlink_waiting(self, node_id: str) -> None:
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(self._waiting_path(node_id))
 
     # --- resumable uploads --------------------------------------------------
     #
@@ -767,14 +944,21 @@ class Storage:
         file_key = drive.keys.unwrap_file_key(node_id, node["wrapped_key"])
         rows = self.conn.execute(
             "SELECT * FROM chunks WHERE node_id = ? ORDER BY idx", (node_id,)).fetchall()
-        if [r["idx"] for r in rows] != list(range(max(1, -(-size // cs)))):
+        waiting = self._waiting.get(node_id)
+        if waiting is None and [r["idx"] for r in rows] != list(range(max(1, -(-size // cs)))):
             raise StorageError("chunk map is incomplete")
         if start == end and size > 0:
+            return
+        if waiting is not None:   # not in Telegram yet
+            data = await asyncio.to_thread(crypto.decrypt_chunk, file_key, node_id, 0, True, waiting.blob)
+            yield data[start:end]
             return
         first = start // cs
         last = max(first, (end - 1) // cs)
         for r in rows[first:last + 1]:
             blob = await self._get_blob(BlobRef(r["chat_id"], r["message_id"], r["file_id"]))
+            if r["pack_offset"] is not None:
+                blob = blob[r["pack_offset"]:r["pack_offset"] + r["pack_length"]]
             data = await asyncio.to_thread(
                 crypto.decrypt_chunk, file_key, node_id, r["idx"], r["idx"] == len(rows) - 1, blob)
             base = r["idx"] * cs
@@ -836,7 +1020,7 @@ class Storage:
     def _detach(self, node_ids: list[str]) -> list[BlobRef]:
         """The rows go first: a crash part-way leaves unreadable blobs behind,
         never entries that point at nothing."""
-        refs: list[BlobRef] = []
+        refs: dict[tuple[str, int], BlobRef] = {}
         gone: set[str] = set()
         with self.conn:
             for node_id in node_ids:
@@ -854,14 +1038,21 @@ class Storage:
                 for r in rows:
                     gone.add(r["node_id"])
                     if r["chat_id"] is not None:
-                        refs.append(BlobRef(r["chat_id"], r["message_id"], r["file_id"]))
+                        refs.setdefault((r["chat_id"], r["message_id"]),
+                                        BlobRef(r["chat_id"], r["message_id"], r["file_id"]))
                 self.conn.execute("DELETE FROM nodes WHERE id = ?", (node_id,))
+            # A pack goes with the last file in it.
+            kept = [key for key in refs if self.conn.execute(
+                "SELECT 1 FROM chunks WHERE chat_id = ? AND message_id = ? LIMIT 1", key).fetchone()]
+        for key in kept:
+            del refs[key]
         for node_id in gone:
+            self._unwait(node_id)
             self._remove_thumbnail(node_id)
             state = self._uploads.pop(node_id, None)
             if state is not None:
                 state.gone = True
-        return refs
+        return list(refs.values())
 
     async def discard(self, refs: list[BlobRef]) -> None:
         """Best effort: an orphaned blob is unreadable noise, so failures are
@@ -1030,6 +1221,12 @@ class Storage:
     # --- database backup ----------------------------------------------------
 
     async def backup(self) -> int:
+        # The snapshot leaves out files not yet in Telegram, so send them
+        # first; if that fails, it is still consistent without them.
+        try:
+            await self.flush_packs()
+        except Exception:
+            log.warning("small files not sent yet are left out of this snapshot", exc_info=True)
         blob = crypto.seal_snapshot(db.snapshot(self.conn), self.backup_passphrase)
         if len(blob) > self.transport.max_blob_size:
             raise StorageError("database snapshot is too large for a single message")

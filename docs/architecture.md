@@ -44,8 +44,9 @@ There are three places data lives:
 
 | Where | What | Encrypted? |
 |---|---|---|
-| Telegram channel | One document message per file chunk, plus one pinned database snapshot | Chunks always. The snapshot only if `TGDRIVE_BACKUP_PASSPHRASE` is set (its keys and names are encrypted either way) |
+| Telegram channel | One document message per file chunk (small files share one), plus one pinned database snapshot | Chunks always. The snapshot only if `TGDRIVE_BACKUP_PASSPHRASE` is set (its keys and names are encrypted either way) |
 | SQLite (`/data`) | Vault, drives, folder tree, chunk map | Names and keys yes; sizes, dates, drive names and tree shape no |
+| `/data/pending` | Small files' chunks for a few seconds, until their pack is sent | Yes, as they will be in Telegram |
 | Thumbnail cache (`/cache`) | One 320px WebP per file | Yes, with the file's own key |
 
 And one place keys live: the server's memory, inside a `Session`.

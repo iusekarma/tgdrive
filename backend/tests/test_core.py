@@ -171,5 +171,116 @@ class CoreTest(unittest.IsolatedAsyncioTestCase):
             fresh.conn.close()
 
 
+class PackTest(unittest.IsolatedAsyncioTestCase):
+    """Small files share messages (CHUNK is 1 KiB here, so a pack holds about that much)."""
+
+    async def asyncSetUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.blobs = os.path.join(self.tmp.name, "blobs")
+        self.pending = os.path.join(self.tmp.name, "pending")
+        self.db_path = os.path.join(self.tmp.name, "a.db")
+        self.transport = LocalTransport(self.blobs)
+        self.store = self.make_store(db.connect(self.db_path))
+        self.vault, _ = await self.store.setup_vault("master-pw")
+        self.drive, _ = await self.store.create_drive(self.vault, "main", None)
+
+    def make_store(self, conn, **kw):
+        kw = {"pack_dir": self.pending, "pack_max_file": 300, "pack_wait": 60, **kw}
+        return Storage(conn, self.transport, chunk_size=CHUNK, **kw)
+
+    async def asyncTearDown(self):
+        await self.store.stop_packing()
+        self.store.conn.close()
+        self.tmp.cleanup()
+
+    def messages(self):
+        return sorted(f for f in os.listdir(self.blobs) if f.endswith(".bin"))
+
+    def waiting(self):
+        return sorted(os.listdir(self.pending))
+
+    async def put(self, name, data):
+        return await self.store.upload(self.drive, None, name, gen(data))
+
+    async def test_small_files_share_a_message(self):
+        files = {f"f{i}": os.urandom(n) for i, n in enumerate((0, 1, 200, 300))}
+        ids = {name: await self.put(name, data) for name, data in files.items()}
+        big = os.urandom(301)
+        big_id = await self.put("big", big)
+        # Only the file over the limit went out; the rest are on disk and readable.
+        self.assertEqual(len(self.messages()), 1)
+        self.assertEqual(len(self.waiting()), 4)
+        for name, data in files.items():
+            self.assertEqual(await read(self.store, self.drive, ids[name]), data)
+        part = b"".join([c async for c in self.store.download(self.drive, ids["f2"], 10, 20)])
+        self.assertEqual(part, files["f2"][10:20])
+
+        await self.store.flush_packs()
+        self.assertEqual((len(self.messages()), self.waiting()), (2, []))
+        for name, data in files.items():
+            self.assertEqual(await read(self.store, self.drive, ids[name]), data)
+        self.assertEqual(await read(self.store, self.drive, big_id), big)
+
+    async def test_full_pack_goes_out_and_timer_sends_the_rest(self):
+        self.store.pack_wait = 0.05
+        for i in range(4):   # 300 bytes each: three fill a pack
+            await self.put(f"f{i}", os.urandom(300))
+        self.assertEqual((len(self.messages()), len(self.waiting())), (1, 1))
+        await asyncio.sleep(0.2)
+        self.assertEqual((len(self.messages()), self.waiting()), (2, []))
+
+    async def test_pack_is_deleted_with_its_last_file(self):
+        a = await self.put("a", os.urandom(100))
+        b = await self.put("b", os.urandom(100))
+        await self.store.flush_packs()
+        self.assertEqual(len(self.messages()), 1)
+        await self.store.delete(self.drive, a)
+        self.assertEqual(len(self.messages()), 1)
+        self.assertEqual(len(await read(self.store, self.drive, b)), 100)
+        await self.store.delete(self.drive, b)
+        self.assertEqual(self.messages(), [])
+
+    async def test_deleted_while_waiting_is_never_sent(self):
+        a = await self.put("a", os.urandom(100))
+        await self.store.delete(self.drive, a)
+        self.assertEqual(self.waiting(), [])
+        await self.store.flush_packs()
+        self.assertEqual(self.messages(), [])
+
+    async def test_waiting_files_survive_a_restart(self):
+        data = os.urandom(100)
+        nid = await self.put("a", data)
+        self.store.conn.close()   # a crash: nothing sent
+        self.store = self.make_store(db.connect(self.db_path), pack_max_file=0)   # and packing turned off
+        self.assertEqual(await self.store.cleanup_incomplete(), 0)
+        self.assertEqual(await self.store.resume_packs(), 1)
+        await self.store.flush_packs()
+        self.assertEqual((len(self.messages()), self.waiting()), (1, []))
+        self.assertEqual(await read(self.store, self.drive, nid), data)
+
+    async def test_snapshot_leaves_out_unsent_files(self):
+        sent = await self.put("sent", os.urandom(100))
+        await self.store.flush_packs()
+        await self.put("unsent", os.urandom(100))
+        restored = os.path.join(self.tmp.name, "restored.db")
+        db.restore(restored, db.snapshot(self.store.conn))
+        fresh = self.make_store(db.connect(restored), pack_dir=None)
+        self.assertEqual(await fresh.cleanup_incomplete(), 1)
+        drive = fresh.open_drive(await fresh.unlock_vault("master-pw"), "main")
+        self.assertEqual([e.id for e in fresh.list(drive)], [sent])
+        fresh.conn.close()
+
+    async def test_backup_sends_waiting_files_first(self):
+        await self.put("a", os.urandom(100))
+        await self.store.backup()
+        self.assertEqual((len(self.messages()), self.waiting()), (1, []))
+
+    async def test_turned_off(self):
+        store = self.make_store(self.store.conn, pack_max_file=0)
+        await store.upload(self.drive, None, "a", gen(os.urandom(100)))
+        await store.upload(self.drive, None, "b", gen(os.urandom(0)))
+        self.assertEqual((len(self.messages()), self.waiting()), (2, []))
+
+
 if __name__ == "__main__":
     unittest.main()

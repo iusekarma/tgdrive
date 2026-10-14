@@ -545,7 +545,8 @@ async def delete_nodes(body: NodesDelete, request: Request, drive: Drive = Depen
 async def upload_file(request: Request, filename: str, parent: str | None = None,
                       drive: Drive = Depends(unlocked_drive), store: Storage = Depends(get_store)):
     """The request body is the raw file. It is encrypted and forwarded chunk
-    by chunk as it arrives, so it is never held in full or written to disk."""
+    by chunk as it arrives, so it is never held in full (a small file waits on
+    disk, encrypted, for its pack; see Storage)."""
     try:
         node_id = await store.upload(drive, parent, filename, request.stream())
     except ClientDisconnect:
@@ -882,10 +883,14 @@ async def lifespan(app: FastAPI):
     store = Storage(db.connect(cfg.db_path), transport, chunk_size=cfg.chunk_size,
                     backup_passphrase=cfg.backup_passphrase, thumb_dir=cfg.thumb_dir,
                     thumb_cache_bytes=cfg.thumb_cache_mb * 1024 * 1024 if cfg.thumb_cache_mb else None,
-                    blob_cache_bytes=cfg.chunk_cache_mb * 1024 * 1024)
+                    blob_cache_bytes=cfg.chunk_cache_mb * 1024 * 1024,
+                    pack_dir=cfg.pack_dir, pack_max_file=cfg.pack_max_file, pack_wait=cfg.pack_wait)
     removed = await store.cleanup_incomplete()
     if removed:
         log.info("removed %d interrupted upload(s)", removed)
+    waiting = await store.resume_packs()
+    if waiting:
+        log.info("%d small file(s) from before the restart are waiting to be sent", waiting)
     store.sweep_thumbnails()
     if not store.vault_exists():
         log.warning("tgdrive is not set up yet: open the web UI or run `python -m app.cli init`")
@@ -915,6 +920,7 @@ async def lifespan(app: FastAPI):
         expiry.cancel()
         if app.state.discards:
             await asyncio.gather(*app.state.discards, return_exceptions=True)
+        await store.stop_packing()
         await backup.stop()
         store.conn.close()
         await transport.close()

@@ -56,16 +56,25 @@ CREATE TABLE IF NOT EXISTS webdav (
     created_at  INTEGER NOT NULL
 );
 
+-- pack_offset and pack_length are set when the chunk shares its message with
+-- other small files' chunks (a pack), and say where in the message it is.
 CREATE TABLE IF NOT EXISTS chunks (
-    node_id    TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
-    idx        INTEGER NOT NULL,
-    chat_id    TEXT NOT NULL,
-    message_id INTEGER NOT NULL,
-    file_id    TEXT NOT NULL,
-    size       INTEGER NOT NULL,
+    node_id     TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+    idx         INTEGER NOT NULL,
+    chat_id     TEXT NOT NULL,
+    message_id  INTEGER NOT NULL,
+    file_id     TEXT NOT NULL,
+    size        INTEGER NOT NULL,
+    pack_offset INTEGER,
+    pack_length INTEGER,
     PRIMARY KEY (node_id, idx)
 );
+CREATE INDEX IF NOT EXISTS chunks_by_message ON chunks(chat_id, message_id);
 """
+
+#: Files whose only chunk is still on local disk, waiting for its pack.
+UNSENT = ("kind = 'file' AND state = 'ready' "
+          "AND NOT EXISTS (SELECT 1 FROM chunks c WHERE c.node_id = nodes.id)")
 
 
 def connect(path: str) -> sqlite3.Connection:
@@ -77,6 +86,9 @@ def connect(path: str) -> sqlite3.Connection:
     conn.executescript(SCHEMA)
     if "info_enc" not in [r["name"] for r in conn.execute("PRAGMA table_info(nodes)")]:
         conn.execute("ALTER TABLE nodes ADD COLUMN info_enc BLOB")   # databases from before file details
+    if "pack_offset" not in [r["name"] for r in conn.execute("PRAGMA table_info(chunks)")]:
+        conn.execute("ALTER TABLE chunks ADD COLUMN pack_offset INTEGER")   # databases from before packs
+        conn.execute("ALTER TABLE chunks ADD COLUMN pack_length INTEGER")
     conn.commit()
     return conn
 
@@ -104,11 +116,19 @@ def _migrate(conn: sqlite3.Connection) -> None:
 
 
 def snapshot(conn: sqlite3.Connection) -> bytes:
-    """Consistent, compacted copy of the live database, gzipped."""
+    """Consistent, compacted copy of the live database, gzipped. Files not in
+    Telegram yet go in as unfinished, so a restore elsewhere removes them
+    rather than listing files it can't read."""
     conn.commit()
     with tempfile.TemporaryDirectory() as tmp:
         out = os.path.join(tmp, "snapshot.db")
         conn.execute("VACUUM INTO ?", (out,))
+        copy = sqlite3.connect(out)
+        try:
+            with copy:
+                copy.execute(f"UPDATE nodes SET state = 'uploading' WHERE {UNSENT}")
+        finally:
+            copy.close()
         with open(out, "rb") as f:
             return gzip.compress(f.read())
 

@@ -337,6 +337,9 @@ All settings go in `backend/.env` (see [backend/.env.example](backend/.env.examp
 | `TGDRIVE_CHUNK_CACHE_MB` | `64` | Recently read chunks kept in memory, still encrypted, so many small range reads of one chunk fetch it from Telegram once; `0` turns it off |
 | `TGDRIVE_BACKUP_DEBOUNCE_SECONDS` | `30` | Delay between a change and its backup |
 | `TGDRIVE_CHUNK_SIZE` | `16777216` | Chunk size in bytes (16 MB) |
+| `TGDRIVE_PACK_SMALL_FILES` | `true` | Small files share Telegram messages, so many of them upload far faster under Telegram's limit of about 20 messages a minute. `false` sends one message per file |
+| `TGDRIVE_PACK_MAX_FILE_MB` | `4` | Files up to this size are packed (at most the chunk size) |
+| `TGDRIVE_PACK_WAIT_SECONDS` | `5` | How long a pack that isn't full waits for more files before it is sent |
 | `TGDRIVE_TRANSPORT` | `telegram` | `local` stores chunks on disk instead, for trying tgdrive without Telegram |
 | `TGDRIVE_LOCAL_DIR` | `./data/blobs` | Where chunks go with `TGDRIVE_TRANSPORT=local` |
 | `TGDRIVE_DB` | `./data/tgdrive.db` | Database path (fixed to `/data` in Docker) |

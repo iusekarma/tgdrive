@@ -100,6 +100,14 @@ re-obtained from the message if the bot is replaced.
 A file of `n` bytes has `max(1, ceil(n / chunk_size))` chunks. `download()`
 checks that the chunk indexes are exactly `0..count-1` before streaming.
 
+Small files' chunks can share a message (a pack; see
+[backend.md](backend.md#packs-small-files-sharing-a-message)). Their rows
+then have `pack_offset` and `pack_length`, the encrypted chunk's place in
+the message, and several rows have the same `message_id`; the index
+`chunks_by_message` finds them when deleting. For a short while after
+upload a small file is `ready` with no `chunks` row at all: its chunk waits
+in `<database folder>/pending/<node id>.chunk` until its pack is sent.
+
 ## Node lifecycle
 
 ```mermaid

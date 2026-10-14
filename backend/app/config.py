@@ -23,6 +23,19 @@ class Config:
     thumb_cache_mb: int = 512           # 0 means no limit
     chunk_cache_mb: int = 64            # recently read chunks, kept encrypted in memory; 0 turns it off
     static_dir: str | None = None       # the built web UI, served at / when set
+    pack_small_files: bool = True       # small files share Telegram messages; see Storage
+    pack_max_file_mb: float = 4.0       # what counts as small (at most the chunk size)
+    pack_wait: float = 5.0              # seconds a pack that isn't full waits for more
+
+    @property
+    def pack_dir(self) -> str:
+        """Small files waiting for their pack. Next to the database, as it
+        must survive a restart."""
+        return os.path.join(os.path.dirname(os.path.abspath(self.db_path)), "pending")
+
+    @property
+    def pack_max_file(self) -> int:
+        return int(self.pack_max_file_mb * 1024 * 1024) if self.pack_small_files else 0
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -43,6 +56,9 @@ class Config:
             thumb_cache_mb=int(os.environ.get("TGDRIVE_THUMB_CACHE_MB", "512")),
             chunk_cache_mb=int(os.environ.get("TGDRIVE_CHUNK_CACHE_MB", "64")),
             static_dir=os.environ.get("TGDRIVE_STATIC_DIR") or None,
+            pack_small_files=os.environ.get("TGDRIVE_PACK_SMALL_FILES", "true").lower() in ("1", "true", "yes"),
+            pack_max_file_mb=float(os.environ.get("TGDRIVE_PACK_MAX_FILE_MB", "4")),
+            pack_wait=float(os.environ.get("TGDRIVE_PACK_WAIT_SECONDS", "5")),
         )
 
     def make_transport(self):
