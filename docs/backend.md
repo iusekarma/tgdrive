@@ -14,6 +14,7 @@ flowchart TD
     server --> httprange
     server --> thumbs
     server --> webdav
+    server --> zipstream
     webdav --> storage
     webdav --> httprange
     cli --> storage
@@ -39,6 +40,7 @@ flowchart TD
 - [backup.py](#backuppy)
 - [thumbs.py](#thumbspy)
 - [httprange.py](#httprangepy)
+- [zipstream.py](#zipstreampy)
 - [server.py](#serverpy)
 - [webdav.py](#webdavpy)
 - [cli.py](#clipy)
@@ -421,6 +423,27 @@ answers 416).
 
 ---
 
+## zipstream.py
+
+`ZipStream(members)` writes a zip as it is sent, for downloading folders
+and multiple items. Each `Member` is a path (folders end in `/`), a size, a
+modification time and, for files, a function that opens the plaintext.
+
+- Files are **stored**, not compressed, so every offset and the total
+  `size` are known before the first byte: the response has a real
+  `Content-Length`.
+- CRC-32s are only known once a file has gone by, so each file is followed
+  by a data descriptor (flag bit 3).
+- ZIP64 is used only where needed: a file of 4 GiB or more, any file that
+  starts past 4 GiB (it gets 8-byte sizes and an 8-byte descriptor too,
+  since `unzip` expects that of any entry with a ZIP64 record), and the
+  ZIP64 end records past 65,535 entries or a 4 GiB central directory.
+  `BIG_SIZE` and `MANY` are the thresholds; the tests lower them.
+- Names are UTF-8 (flag bit 11), and an extended-timestamp extra carries
+  the real modification time alongside the DOS one.
+
+---
+
 ## server.py
 
 The FastAPI application. Sections in the file:
@@ -446,6 +469,13 @@ Two route details worth knowing:
   the `StreamingResponse`. A missing chunk or failed integrity check then
   becomes a proper error response, instead of a `200` that is cut off
   half-way.
+- Zips take two requests. `create_zip` checks the selection and keeps it
+  in the device's `Session.zips` (the newest 16) under a random id;
+  `download_zip` then walks it (`Storage.walk`) and streams it. The
+  browser fetches the second with a plain link, so it downloads natively
+  however many items were picked. A name used twice at the top of a zip
+  (possible from search results) becomes `name (2).ext`. A file's time is
+  its `modified` detail if known, else when it was uploaded.
 - `delete_node`, `delete_nodes` and `delete_drive` answer as soon as the
   rows are gone; message deletion continues in the background and shutdown
   waits for it.
@@ -507,4 +537,4 @@ runs against `LocalTransport` in a temporary folder.
 | `test_vault.py` | Vault setup, unlock and recovery; open vs password drives; legacy drive migration; bulk move/delete; Telegram `deleteMessages` batching (with a fake); thumbnail encoding; search ranking |
 | `test_services.py` | `Storage` API surface, resumable uploads (including a flaky transport), the shared `Sessions` and its idle expiry, `UploadQueue`, `LoginThrottle`, Range parsing, `BackupScheduler` |
 | `test_webdav.py` | WebDAV end to end: turning it on and off, new passwords, sign-in and throttling, files and folders (PUT, overwrite, ranges, COPY, MOVE, DELETE), locks, PROPPATCH, read-only access and its binding to the key |
-| `test_api.py` | The HTTP API end to end with FastAPI's `TestClient`: files and folders, locking, cookies and errors, drive passwords, rename, resumable upload, thumbnails, search, admin-password setup, static UI serving |
+| `test_api.py` | The HTTP API end to end with FastAPI's `TestClient`: files and folders, locking, cookies and errors, drive passwords, rename, resumable upload, thumbnails, search, zip downloads (read back with `zipfile`, ZIP64 included), admin-password setup, static UI serving |

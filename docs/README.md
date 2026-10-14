@@ -46,6 +46,7 @@ tgdrive/
 │   │   ├── backup.py       debounced database snapshots
 │   │   ├── thumbs.py       safe image → 320px WebP
 │   │   ├── httprange.py    Range header parsing
+│   │   ├── zipstream.py    zips written as they are sent (folder downloads)
 │   │   ├── config.py       environment variables → Config
 │   │   ├── cli.py          command-line access to storage.py
 │   │   └── transport/

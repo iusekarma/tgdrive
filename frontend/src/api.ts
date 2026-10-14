@@ -226,6 +226,9 @@ export const api = {
     navigator.sendBeacon("/api/uploads/leave", new Blob([JSON.stringify({ client })], { type: "application/json" })),
   removeMany: (drive: string, ids: string[]) => request<void>("POST", `${drivePath(drive)}/nodes/delete`, { ids }),
 
+  /** Folders and several items download as one zip: this returns the link to fetch it from. */
+  createZip: (drive: string, ids: string[], name: string) =>
+    request<{ id: string; url: string }>("POST", `${drivePath(drive)}/zips`, { ids, name }),
   fileUrl: (drive: string, id: string, inline = false) =>
     `/api${drivePath(drive)}/files/${id}${inline ? "?inline=true" : ""}`,
   /** `length` bytes from `offset`, served as a file called `name` (a file stored uncompressed in a zip). */

@@ -248,7 +248,10 @@ The file browser for one drive and folder.
   anything is selected, plain clicks select too. Ctrl/Cmd+A selects all,
   Esc clears, Delete/Backspace deletes, F2 renames.
 - **Actions**: new folder, upload files, upload folder, rename, move (one or
-  many), delete (one or many), download, preview, lock drive.
+  many), delete (one or many), download, preview, lock drive. A folder,
+  or more than one item, downloads as a zip (`downloadZip`: `api.createZip`,
+  then a link click on the `url` it returns), named after the folder or
+  the folder being shown.
 - **Drag and drop**: files and folders dropped anywhere on the page go to
   `uploads.enqueue` for the current folder.
 - **Opening**: folders navigate; previewable files open the `Viewer`;

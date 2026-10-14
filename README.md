@@ -8,7 +8,7 @@ preview and search them, all behind one master password. Each drive can also
 have a password of its own.
 
 - End-to-end encrypted: Telegram only ever sees encrypted chunks
-- Web UI with folders (upload whole folders), uploads that resume after a dropped connection, search, image and video thumbnails, a full-window viewer (images, video including MPEG-TS, audio, PDF, text, zip contents, CBZ comics read a page at a time), and range downloads (video seeking)
+- Web UI with folders (upload whole folders), uploads that resume after a dropped connection, search, image and video thumbnails, a full-window viewer (images, video including MPEG-TS, audio, PDF, text, zip contents, CBZ comics read a page at a time), range downloads (video seeking), and folders or several files downloaded as one zip
 - Several drives, each optionally protected by its own password
 - Mount any drive as a network drive over WebDAV (Windows, macOS, Linux, rclone)
 - Recovery keys for every password
@@ -434,6 +434,8 @@ Interactive docs are served at **http://localhost:8000/api/docs**.
 | POST | `/api/uploads/sync` | The upload line every device shares: report this tab's uploads, get everyone's |
 | POST | `/api/uploads/leave` | A closing tab leaves the upload line |
 | GET | `/api/drives/{name}/files/{id}` | Download; supports `Range` and `?inline=true`, and `offset`, `length`, `filename` to serve part of the file as a file of its own |
+| POST | `/api/drives/{name}/zips` | Start a zip of `ids` (folders included); answers with the `url` to fetch it from |
+| GET | `/api/drives/{name}/zips/{id}` | The zip, streamed as it is built (stored, not compressed; length known up front) |
 | GET · PUT | `/api/drives/{name}/files/{id}/thumbnail` | Get or upload a 320px WebP thumbnail |
 | GET · PUT | `/api/drives/{name}/files/{id}/info` | Get or merge a file's details (dimensions, length, dates, camera) |
 

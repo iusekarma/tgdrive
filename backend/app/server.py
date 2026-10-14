@@ -31,6 +31,7 @@ from .storage import (Conflict, Drive, Gone, NoSnapshot, NotFound, NoVault, Stor
 from .transport import BlobRef
 from .uploadqueue import UploadQueue
 from .webdav import router as webdav_router
+from .zipstream import Member, ZipStream
 
 log = logging.getLogger("tgdrive")
 
@@ -179,6 +180,11 @@ class NodesMove(BaseModel):
 
 class NodesDelete(BaseModel):
     ids: NodeIds
+
+
+class ZipCreate(BaseModel):
+    ids: NodeIds
+    name: str | None = Field(None, max_length=255)
 
 
 # --- dependencies ------------------------------------------------------------
@@ -698,6 +704,65 @@ async def download_file(node_id: str, request: Request, inline: bool = False,
             yield piece
 
     return StreamingResponse(body(), status_code=206 if rng else 200, media_type=media, headers=headers)
+
+
+def _unique(name: str, taken: set[str]) -> str:
+    """`name`, or "name (2).ext" and so on if the zip already has it."""
+    stem, dot, ext = name.rpartition(".") if "." in name.lstrip(".") else (name, "", "")
+    n, out = 2, name
+    while out in taken:
+        out, n = f"{stem} ({n}){dot}{ext}", n + 1
+    taken.add(out)
+    return out
+
+
+@router.post("/drives/{name}/zips", status_code=201)
+async def create_zip(body: ZipCreate, session: Session = Depends(unlocked_vault),
+                     drive: Drive = Depends(unlocked_drive), store: Storage = Depends(get_store)):
+    """Step one of downloading several items, or a folder, as one zip: send
+    the selection, then fetch `url` with a plain link so the browser
+    downloads it. A single folder is named after itself, anything else
+    after `name` (or the drive)."""
+    first = store.stat(drive, body.ids[0])
+    for node_id in body.ids[1:]:
+        store.stat(drive, node_id)
+    base = first.name if len(body.ids) == 1 else (body.name or drive.name)
+    base = base.replace("/", "_").removesuffix(".zip") or "download"
+    zip_id = session.add_zip(drive.name, body.ids, base + ".zip")
+    return {"id": zip_id, "url": f"/api/drives/{quote(drive.name)}/zips/{zip_id}"}
+
+
+@router.get("/drives/{name}/zips/{zip_id}")
+async def download_zip(zip_id: str, session: Session = Depends(unlocked_vault),
+                       drive: Drive = Depends(unlocked_drive), store: Storage = Depends(get_store)):
+    """Files are stored uncompressed, so the length is known up front; the
+    download can't be resumed partway, but asking again starts it over."""
+    pending = session.zips.get(zip_id)
+    if pending is None or pending[0] != drive.name:
+        raise HTTPException(404, "this download has expired; start it again")
+    _, ids, filename = pending
+    members, taken = [], set()
+    for node_id in ids:
+        items = store.walk(drive, node_id)
+        top = _unique(items[0][0].rstrip("/"), taken)
+        for path, entry in items:
+            path = top + path[len(items[0][0].rstrip("/")):]
+            if entry.kind == "dir":
+                members.append(Member(path, mtime=entry.created_at))
+                continue
+            try:
+                mtime = int(store.info(drive, entry.id).get("modified") or entry.created_at)
+            except (crypto.BadKey, ValueError, TypeError):
+                mtime = entry.created_at
+            members.append(Member(path, entry.size, mtime,
+                                  lambda node=entry.id: store.download(drive, node)))
+    archive = ZipStream(members)
+    return StreamingResponse(aiter(archive), media_type="application/zip", headers={
+        "Content-Length": str(archive.size),
+        "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}",
+        "X-Content-Type-Options": "nosniff",
+        "Cache-Control": "private, no-store",
+    })
 
 
 @router.get("/drives/{name}/files/{node_id}/thumbnail")

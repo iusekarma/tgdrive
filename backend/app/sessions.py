@@ -24,6 +24,16 @@ class Session:
     def __init__(self, shared: _Shared):
         self._shared = shared
         self.drives: dict[str, Drive] = {}
+        # Zips asked for but not necessarily fetched yet: id -> (drive, node ids, file name).
+        self.zips: dict[str, tuple[str, list[str], str]] = {}
+
+    def add_zip(self, drive: str, ids: list[str], filename: str) -> str:
+        """Keeps the newest few, so the browser can retry one it is downloading."""
+        zip_id = secrets.token_urlsafe(16)
+        self.zips[zip_id] = (drive, ids, filename)
+        while len(self.zips) > 16:
+            del self.zips[next(iter(self.zips))]
+        return zip_id
 
     @property
     def vault(self) -> VaultKeys | None:

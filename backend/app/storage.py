@@ -434,6 +434,18 @@ class Storage:
     def find(self, drive: Drive, parent_id: str | None, name: str) -> Entry | None:
         return next((e for e in self.list(drive, parent_id) if e.name == name), None)
 
+    def walk(self, drive: Drive, node_id: str, prefix: str = "") -> list[tuple[str, Entry]]:
+        """The item and, for a folder, everything under it, each with its path
+        from `prefix`; folders' paths end in "/" and come before their contents."""
+        entry = self.stat(drive, node_id)
+        path = prefix + entry.name
+        if entry.kind != "dir":
+            return [(path, entry)]
+        out = [(path + "/", entry)]
+        for child in self.list(drive, node_id):
+            out += self.walk(drive, child.id, path + "/")
+        return out
+
     def search(self, drive: Drive, query: str, limit: int = 200) -> tuple[list[tuple[Entry, list[tuple[str, str]]]], int]:
         """Case-insensitive; every word must appear in the name. Names are
         encrypted, so this decrypts the drive's names in memory: about

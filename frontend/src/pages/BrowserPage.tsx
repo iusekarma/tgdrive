@@ -351,6 +351,23 @@ export default function BrowserPage() {
     leaveDrive();
   }
 
+  /** Folders and multiple items arrive as one zip, named after a lone folder or the folder they are in. */
+  async function downloadZip(items: Entry[]) {
+    setNotice(null);
+    try {
+      const { url } = await api.createZip(
+        drive,
+        items.map((e) => e.id),
+        crumbs.length ? crumbs[crumbs.length - 1].name : drive,
+      );
+      const link = document.createElement("a");
+      link.href = url;
+      link.click();
+    } catch (err) {
+      setNotice(err instanceof ApiError ? err.message : "The zip couldn't be started.");
+    }
+  }
+
   function itemMenu(entry: Entry) {
     return (
       <Menu label={`More actions for ${entry.name}`}>
@@ -372,6 +389,17 @@ export default function BrowserPage() {
                   <Download size={16} />
                   Download
                 </a>
+              )}
+              {entry.kind === "dir" && (
+                <MenuItem
+                  onSelect={() => {
+                    closeMenu();
+                    void downloadZip([entry]);
+                  }}
+                >
+                  <Download size={16} />
+                  Download as zip
+                </MenuItem>
               )}
               {locations.has(entry.id) && (
                 <MenuItem
@@ -622,6 +650,12 @@ export default function BrowserPage() {
                   Download
                 </a>
               )}
+              {!(chosen.length === 1 && chosen[0].kind === "file") && (
+                <Button className="py-1.5" onClick={() => void downloadZip(chosen)}>
+                  <Download size={16} />
+                  Download zip
+                </Button>
+              )}
               {chosen.length === 1 && (
                 <Button className="py-1.5" onClick={() => setOpen({ type: "rename", entry: chosen[0] })}>
                   <Pencil size={16} />
@@ -749,7 +783,15 @@ export default function BrowserPage() {
                             <Download size={18} />
                           </a>
                         ) : (
-                          <span className="w-[34px]" aria-hidden="true" />
+                          <button
+                            type="button"
+                            onClick={() => void downloadZip([entry])}
+                            aria-label={`Download ${entry.name} as zip`}
+                            title="Download as zip"
+                            className={ICON_BUTTON}
+                          >
+                            <Download size={18} />
+                          </button>
                         )}
                         {itemMenu(entry)}
                       </div>

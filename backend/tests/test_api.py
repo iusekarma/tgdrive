@@ -1,8 +1,11 @@
 """End-to-end API tests through FastAPI's TestClient, on the local transport."""
 import os
 import tempfile
+import time
 import unittest
+import zipfile
 from io import BytesIO
+from unittest import mock
 
 from PIL import Image
 
@@ -11,7 +14,7 @@ try:
 except ImportError:
     raise unittest.SkipTest("fastapi is not installed")
 
-from app import crypto
+from app import crypto, zipstream
 from app.config import Config
 from app.server import COOKIE, create_app
 
@@ -342,6 +345,54 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(c.get("/api/drives/main/search", params={"q": "x" * 201}).status_code, 422)
         c.post("/api/drives/main/lock")
         self.assertEqual(c.get("/api/drives/main/search", params={"q": "b"}).status_code, 401)
+
+    def _zip(self, ids, **body):
+        r = self.c.post("/api/drives/main/zips", json={"ids": ids, **body})
+        self.assertEqual(r.status_code, 201, r.text)
+        r = self.c.get(r.json()["url"])
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(int(r.headers["content-length"]), len(r.content))
+        zf = zipfile.ZipFile(BytesIO(r.content))
+        self.assertIsNone(zf.testzip())
+        return r, zf
+
+    def test_zip_download(self):
+        c = self.c
+        trip = c.post("/api/drives/main/folders", json={"name": "Trip"}).json()["id"]
+        sub = c.post("/api/drives/main/folders", json={"name": "Día 1", "parent_id": trip}).json()["id"]
+        c.post("/api/drives/main/folders", json={"name": "empty", "parent_id": trip})
+        a, b = os.urandom(5000), os.urandom(1024)
+        fa = c.put("/api/drives/main/files", params={"filename": "a.bin", "parent": sub}, content=a).json()["id"]
+        c.put("/api/drives/main/files", params={"filename": "b.txt", "parent": trip}, content=b)
+        c.put(f"/api/drives/main/files/{fa}/info", json={"modified": 1700000000})
+
+        r, zf = self._zip([trip])
+        self.assertIn("filename*=UTF-8''Trip.zip", r.headers["content-disposition"])
+        self.assertEqual(zf.namelist(), ["Trip/", "Trip/Día 1/", "Trip/Día 1/a.bin", "Trip/empty/", "Trip/b.txt"])
+        self.assertEqual(zf.read("Trip/Día 1/a.bin"), a)
+        self.assertEqual(zf.read("Trip/b.txt"), b)
+        self.assertEqual(zf.getinfo("Trip/Día 1/a.bin").date_time,
+                         time.localtime(1700000000)[:6])
+
+        # Several items; a name used twice gets a number.
+        other = c.post("/api/drives/main/folders", json={"name": "other"}).json()["id"]
+        dup = c.put("/api/drives/main/files", params={"filename": "b.txt", "parent": other}, content=b"!").json()["id"]
+        top = c.put("/api/drives/main/files", params={"filename": "b.txt"}, content=b"?").json()["id"]
+        r, zf = self._zip([top, dup, sub], name="picked")
+        self.assertIn("picked.zip", r.headers["content-disposition"])
+        self.assertEqual(zf.namelist(), ["b.txt", "b (2).txt", "Día 1/", "Día 1/a.bin"])
+        self.assertEqual((zf.read("b.txt"), zf.read("b (2).txt")), (b"?", b"!"))
+
+        # ZIP64 sizes, offsets and entry counts, with the limits lowered.
+        with mock.patch.object(zipstream, "BIG_SIZE", 2000), mock.patch.object(zipstream, "MANY", 3):
+            _, zf = self._zip([trip])
+            self.assertEqual(zf.read("Trip/Día 1/a.bin"), a)
+            self.assertEqual(zf.read("Trip/b.txt"), b)
+
+        self.assertEqual(c.post("/api/drives/main/zips", json={"ids": ["nope"]}).status_code, 404)
+        self.assertEqual(c.get("/api/drives/main/zips/nope").status_code, 404)
+        c.post("/api/drives/main/lock")
+        self.assertEqual(c.post("/api/drives/main/zips", json={"ids": [trip]}).status_code, 401)
 
 
 class SetupTest(unittest.TestCase):
