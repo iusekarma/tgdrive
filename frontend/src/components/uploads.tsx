@@ -722,6 +722,9 @@ export function UploadsProvider({ children }: { children: ReactNode }) {
     }
   }
   for (const item of items) if (!placed.has(item.id)) rows.push({ key: keyOf(item.id), item, other: false });
+  // Finished rows sink below the rest, so what's still going stays in view at the top.
+  const finished = (row: (typeof rows)[number]) => row.item.status === "done" || row.item.status === "cancelled";
+  rows.sort((a, b) => Number(finished(a)) - Number(finished(b)));
   const shown = rows.map((row) => row.item);
 
   const sending = items.some((item) => ACTIVE.includes(item.status));
