@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
-import { ChevronRight, Folder, HardDrive, LayoutGrid, Lock } from "lucide-react";
-import { useEffect, useState } from "react";
+import { ChevronRight, Folder, HardDrive, LayoutGrid, LocateFixed, Lock } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
 import { api, type Crumb, type DriveInfo } from "../api";
@@ -10,6 +10,19 @@ import { driveUrl } from "../format";
 const key = (drive: string, id: string | null) => `${drive}\n${id ?? ""}`;
 
 const ROW = "flex min-w-0 flex-1 items-center gap-2 rounded-md py-1.5 pr-2 text-sm";
+
+/** The folder being viewed, and a count bumped each time it is asked to be shown. */
+type Current = { drive: string; folder: string | null; reveal: number };
+
+/** Scrolls the current row into view once it is asked to be shown. The row may
+ * only appear after its parents load, so this also runs when it mounts. */
+function useReveal<T extends HTMLElement>(here: boolean, reveal: number) {
+  const ref = useRef<T>(null);
+  useEffect(() => {
+    if (here && reveal) ref.current?.scrollIntoView({ block: "nearest" });
+  }, [here, reveal]);
+  return ref;
+}
 
 function Toggle({
   expanded,
@@ -49,7 +62,7 @@ function Folders({
   drive: string;
   parent: string | null;
   depth: number;
-  current: { drive: string; folder: string | null };
+  current: Current;
   expanded: Set<string>;
   onToggle: (k: string) => void;
 }) {
@@ -94,7 +107,7 @@ function FolderRow({
   id: string;
   name: string;
   depth: number;
-  current: { drive: string; folder: string | null };
+  current: Current;
   expanded: Set<string>;
   onToggle: (k: string) => void;
 }) {
@@ -104,9 +117,10 @@ function FolderRow({
   const children = useQuery({ queryKey: ["nodes", drive, id], queryFn: () => api.list(drive, id), enabled: open });
   const empty = !!children.data && !children.data.entries.some((e) => e.kind === "dir");
   const here = current.drive === drive && current.folder === id;
+  const ref = useReveal<HTMLDivElement>(here, current.reveal);
   return (
     <li>
-      <div className="flex items-center" style={{ paddingLeft: depth * 14 }}>
+      <div ref={ref} className="flex items-center" style={{ paddingLeft: depth * 14 }}>
         <Toggle expanded={open} empty={empty} label={name} onToggle={() => onToggle(k)} />
         <Link
           to={driveUrl(drive, id)}
@@ -139,7 +153,7 @@ function DriveRow({
   onToggle,
 }: {
   drive: DriveInfo;
-  current: { drive: string; folder: string | null };
+  current: Current;
   expanded: Set<string>;
   onToggle: (k: string) => void;
 }) {
@@ -147,6 +161,7 @@ function DriveRow({
   const k = key(drive.name, null);
   const open = drive.unlocked && expanded.has(k);
   const here = current.drive === drive.name && current.folder === null;
+  const ref = useReveal<HTMLDivElement>(here, current.reveal);
   const label = (
     <>
       {drive.unlocked ? (
@@ -160,7 +175,7 @@ function DriveRow({
   const style = `${ROW} pl-1 ${here ? "bg-teal/10 font-medium text-ink" : "text-ink hover:bg-ink/5"}`;
   return (
     <li>
-      <div className="flex items-center">
+      <div ref={ref} className="flex items-center">
         {drive.unlocked ? (
           <>
             <Toggle expanded={open} empty={false} label={drive.name} onToggle={() => onToggle(k)} />
@@ -195,22 +210,21 @@ function DriveRow({
   );
 }
 
-/** Every drive, and the folder tree of the unlocked ones. Opens itself down
- * to the folder being viewed. */
+/** Every drive, and the folder tree of the unlocked ones. Folders open only
+ * when their arrow is pressed; "Show current folder" opens the tree down to
+ * the folder being viewed. */
 export default function Sidebar({ drive, folder, path }: { drive: string; folder: string | null; path: Crumb[] }) {
   const drives = useQuery({ queryKey: ["drives"], queryFn: api.drives });
-  const [expanded, setExpanded] = useState<Set<string>>(() => new Set([key(drive, null)]));
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
+  const [reveal, setReveal] = useState(0);
 
-  const trail = path.map((c) => c.id).join("/");
-  useEffect(() => {
-    setExpanded((prev) => {
-      const wanted = [key(drive, null), ...path.map((c) => key(drive, c.id))];
-      if (wanted.every((k) => prev.has(k))) return prev;
-      return new Set([...prev, ...wanted]);
-    });
-    // `trail` stands in for `path`, which is a new array on every render.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [drive, trail]);
+  // Opens the drive and every folder above the one being viewed; the viewed
+  // folder itself stays as it was.
+  function showCurrent() {
+    const wanted = [key(drive, null), ...path.slice(0, -1).map((c) => key(drive, c.id))];
+    setExpanded((prev) => (wanted.every((k) => prev.has(k)) ? prev : new Set([...prev, ...wanted])));
+    setReveal((n) => n + 1);
+  }
 
   function toggle(k: string) {
     setExpanded((prev) => {
@@ -220,7 +234,7 @@ export default function Sidebar({ drive, folder, path }: { drive: string; folder
     });
   }
 
-  const current = { drive, folder };
+  const current = { drive, folder, reveal };
   return (
     <nav aria-label="Drives" className="space-y-4 px-3 py-6">
       <Link
@@ -231,7 +245,18 @@ export default function Sidebar({ drive, folder, path }: { drive: string; folder
         All drives
       </Link>
       <div>
-        <h2 className="px-2 pb-1 text-xs font-medium uppercase tracking-wide text-muted">Drives</h2>
+        <div className="flex items-center justify-between pb-1 pl-2">
+          <h2 className="text-xs font-medium uppercase tracking-wide text-muted">Drives</h2>
+          <button
+            type="button"
+            title="Show current folder"
+            aria-label="Show current folder in tree"
+            onClick={showCurrent}
+            className="rounded p-1 text-muted hover:bg-ink/5 hover:text-ink"
+          >
+            <LocateFixed size={14} aria-hidden="true" />
+          </button>
+        </div>
         {drives.isPending && <p className="px-2 text-sm text-muted">Loading…</p>}
         <ul>
           {drives.data?.map((d) => (

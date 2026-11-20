@@ -265,7 +265,9 @@ The file browser for one drive and folder.
 
 Lists every drive, with the folder tree of unlocked drives. Folders load
 lazily (`["nodes", drive, id]`, only when expanded), sharing the cache with
-the main listing. It expands itself down to the folder being viewed.
+the main listing. Nothing opens on its own: only the arrows expand folders,
+and the locate button beside "Drives" opens the tree down to the folder being
+viewed and scrolls it into view.
 Clicking a locked drive goes to the drives page to unlock it.
 
 ## components/driveDialogs.tsx
