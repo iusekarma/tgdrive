@@ -157,14 +157,17 @@ function fromMedia(
   source: Blob | string,
   tag: "video" | "audio",
   read: (media: HTMLMediaElement, done: (look: Look) => void, info: FileInfo) => void,
+  signal?: AbortSignal,
 ): Promise<Look> {
   return new Promise((resolve) => {
+    if (signal?.aborted) return resolve({ image: null, info: {} });
     const local = typeof source !== "string";
     const url = local ? URL.createObjectURL(source) : source;
     const media = document.createElement(tag);
     const info: FileInfo = {};
     const done = (look: Look) => {
       clearTimeout(timer);
+      signal?.removeEventListener("abort", stop);
       media.removeAttribute("src");
       media.load();
       if (local) URL.revokeObjectURL(url);
@@ -172,8 +175,11 @@ function fromMedia(
     };
     // From the server, the frame may first have to come from Telegram.
     const timer = setTimeout(() => done({ image: null, info }), local ? 15_000 : 45_000);
+    const stop = () => done({ image: null, info });
+    signal?.addEventListener("abort", stop);
     media.muted = true;
-    media.preload = tag === "video" ? "auto" : "metadata";
+    // From the server, only what the seek needs: each byte read may first come from Telegram.
+    media.preload = tag === "video" && local ? "auto" : "metadata";
     media.onerror = () => done({ image: null, info });
     read(media, done, info);
     media.src = url;
@@ -181,7 +187,7 @@ function fromMedia(
 }
 
 /** Seeks to frameTime() and draws that frame. */
-const fromVideo = (source: Blob | string) =>
+const fromVideo = (source: Blob | string, signal?: AbortSignal) =>
   fromMedia(source, "video", (media, done, info) => {
     const video = media as HTMLVideoElement;
     video.onloadedmetadata = () => {
@@ -194,7 +200,7 @@ const fromVideo = (source: Blob | string) =>
         (image) => done({ image, info }),
         () => done({ image: null, info }),
       );
-  });
+  }, signal);
 
 const fromAudio = (file: Blob) =>
   fromMedia(file, "audio", (audio, done, info) => {
@@ -276,36 +282,42 @@ export function sendVideoFrame(drive: string, id: string): Promise<boolean> {
   return fromVideo(api.fileUrl(drive, id, true)).then((look) => send(drive, id, look.image), () => false);
 }
 
-/** Throws the file's thumbnail away and makes a new one: from the file read
- * back from the server for images and videos the browser can decode, or by
- * the server for other images. Resolves to whether there is one now. */
+/** Throws the file's thumbnail away and makes a new one, as makeThumbnail()
+ * does: images up to 50 MB on the server, which fetches the file itself, so
+ * the browser downloads nothing; videos and larger images here. Resolves to
+ * whether there is one now. */
 export async function regenerateThumbnail(drive: string, entry: Entry): Promise<boolean> {
-  const kind = previewKind(entry.name, entry.size);
   const k = key(drive, entry.id);
-  let made = () => {};
-  making.set(k, new Promise<void>((resolve) => (made = resolve)));
-  let image: Blob | null = null;
   try {
     await api.deleteThumbnail(drive, entry.id);
-    forget(k);
-    try {
-      if (kind === "image") {
-        const res = await fetch(api.fileUrl(drive, entry.id, true));
-        if (res.ok) image = (await fromImage(await res.blob())).image;
-      } else if (kind === "video") {
-        image = (await fromVideo(api.fileUrl(drive, entry.id, true))).image;
-      }
-    } catch {
-      // Not decodable here.
-    }
-    if (image && (await send(drive, entry.id, image))) return true;
   } catch {
     return false;
-  } finally {
-    making.delete(k);
-    made();
-    changed(k);
   }
-  // An image this browser can't decode: the server may still manage.
-  return hasThumbnail({ ...entry, thumb: false }) && (await loadThumbnail(drive, entry.id)) !== null;
+  forget(k);
+  try {
+    return await makeThumbnail(drive, { ...entry, thumb: false }, new AbortController().signal);
+  } finally {
+    changed(k);   // whatever shows it loads the new one, or the icon
+  }
+}
+
+/** For a file that has no thumbnail: images the server can thumbnail are left
+ * to it, so the browser doesn't download them; larger ones and videos are
+ * drawn here from the server's copy (a video only as far as the frame).
+ * Resolves to whether there is one now. Stops early when `signal` aborts. */
+export async function makeThumbnail(drive: string, entry: Entry, signal: AbortSignal): Promise<boolean> {
+  const kind = previewKind(entry.name, entry.size);
+  if (kind === "image" && entry.size <= SERVER_SOURCE_MAX) return (await loadThumbnail(drive, entry.id)) !== null;
+  let image: Blob | null = null;
+  try {
+    if (kind === "image") {
+      const res = await fetch(api.fileUrl(drive, entry.id, true), { signal });
+      if (res.ok) image = (await fromImage(await res.blob())).image;
+    } else if (kind === "video") {
+      image = (await fromVideo(api.fileUrl(drive, entry.id, true), signal)).image;
+    }
+  } catch {
+    return false;   // not decodable here, or stopped
+  }
+  return !signal.aborted && send(drive, entry.id, image);
 }

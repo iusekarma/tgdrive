@@ -269,7 +269,8 @@ flowchart TD
 The viewer makes one for a file opened without one: from the image it
 shows, or from a frame read by a hidden second player for a video.
 **Regenerate thumbnail** sends `DELETE /files/{id}/thumbnail` and then
-makes one the same way, falling back to the server for images.
+lets the server make an image's (up to 50 MB) on the next GET; videos and
+larger images are drawn in the browser.
 
 ## Backup
 

@@ -395,7 +395,8 @@ after uploading them; a video's is a frame a tenth of the way in (at least
 3 seconds, at most 3 minutes). A file opened in the viewer without one gets
 one then, and images uploaded other ways get one made on the server when
 first shown (up to 50 MB). **Regenerate thumbnail** in a file's menu makes a
-new one. Thumbnails are encrypted with their file's key and kept in the
+new one, and **Make thumbnails** in a folder makes them, one by one, for the
+images and videos there that have none (it stops when you leave the folder). Thumbnails are encrypted with their file's key and kept in the
 channel, a few hundred to a message so they cost almost nothing against
 Telegram's rate limits, and cached on the server.
 

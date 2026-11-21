@@ -7,6 +7,7 @@ import {
   FolderInput,
   FolderPlus,
   FolderUp,
+  Images,
   Info,
   KeyRound,
   Lock,
@@ -45,6 +46,7 @@ import {
   forgetThumbnails,
   hasThumbnail,
   loadThumbnail,
+  makeThumbnail,
   regenerateThumbnail,
   useThumbnailVersion,
 } from "../thumbs";
@@ -260,10 +262,19 @@ export default function BrowserPage() {
     forgetThumbnails(old);
   }, [drive, queryClient]);
 
+  // Making a folder's thumbnails, one file at a time. Leaving the folder stops it.
+  const [making, setMaking] = useState<{ done: number; total: number } | null>(null);
+  const makingRun = useRef<AbortController | null>(null);
+
   useEffect(() => {
     setNotice(null);
     setSelected(new Set());
     anchor.current = null;
+    return () => {
+      makingRun.current?.abort();
+      makingRun.current = null;
+      setMaking(null);
+    };
   }, [drive, parent, query]);
 
   // While searching, results stand in for the folder: selection and actions work the same.
@@ -380,6 +391,35 @@ export default function BrowserPage() {
   /** Images and videos; others have nothing to draw one from. */
   const canThumbnail = (entry: Entry) =>
     entry.kind === "file" && ["image", "video"].includes(previewKind(entry.name, entry.size) ?? "");
+
+  const missingThumbnails = searching ? [] : entries.filter((e) => canThumbnail(e) && !e.thumb);
+
+  /** One file at a time, so Telegram and the browser's connections stay free for browsing. */
+  async function makeThumbnails() {
+    const todo = missingThumbnails;
+    if (makingRun.current || todo.length === 0) return;
+    const run = new AbortController();
+    makingRun.current = run;
+    setNotice(null);
+    setMaking({ done: 0, total: todo.length });
+    let failed = 0;
+    for (const [i, entry] of todo.entries()) {
+      if (run.signal.aborted) return;
+      if (await makeThumbnail(drive, entry, run.signal)) void refresh();
+      else failed += 1;
+      if (run.signal.aborted) return;
+      setMaking({ done: i + 1, total: todo.length });
+    }
+    makingRun.current = null;
+    setMaking(null);
+    if (failed) setNotice(`${failed} of ${todo.length} files couldn't get a thumbnail.`);
+  }
+
+  function stopMakingThumbnails() {
+    makingRun.current?.abort();
+    makingRun.current = null;
+    setMaking(null);
+  }
 
   async function remakeThumbnail(entry: Entry) {
     setNotice(null);
@@ -597,6 +637,25 @@ export default function BrowserPage() {
               <FolderPlus size={16} />
               New folder
             </Button>
+            {making ? (
+              <span className="inline-flex items-center gap-2 text-sm text-muted" role="status">
+                Making thumbnails: {making.done} of {making.total}
+                <Button className="py-1.5" onClick={stopMakingThumbnails}>
+                  <X size={16} />
+                  Stop
+                </Button>
+              </span>
+            ) : (
+              missingThumbnails.length > 0 && (
+                <Button
+                  onClick={() => void makeThumbnails()}
+                  title={`Make thumbnails for the ${missingThumbnails.length} images and videos here that have none`}
+                >
+                  <Images size={16} />
+                  Make thumbnails
+                </Button>
+              )
+            )}
             <input
               ref={fileInput}
               type="file"

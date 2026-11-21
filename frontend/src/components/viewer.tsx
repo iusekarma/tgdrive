@@ -37,6 +37,79 @@ function useSavedFlag(key: string): [boolean, (on: boolean) => void] {
   return [on, change];
 }
 
+/** A spinner, with how far along it is when the size is known. */
+function Loading({ label = "Loading…", loaded, total }: { label?: string; loaded?: number; total?: number }) {
+  const pct = loaded !== undefined && total ? Math.min(100, Math.floor((loaded / total) * 100)) : null;
+  return (
+    <div role="status" className="flex w-56 max-w-full flex-col items-center gap-3 text-sm text-white/75">
+      <span
+        aria-hidden="true"
+        className="size-9 animate-spin rounded-full border-[3px] border-white/15 border-t-white/80"
+      />
+      <span>
+        {label}
+        {pct !== null && <span className="ml-1.5 tabular-nums text-white">{pct}%</span>}
+      </span>
+      {pct !== null && (
+        <>
+          <span className="h-1 w-full overflow-hidden rounded-full bg-white/10">
+            <span className="block h-full rounded-full bg-[var(--teal)] transition-[width]" style={{ width: `${pct}%` }} />
+          </span>
+          <span className="text-xs tabular-nums text-white/50">
+            {formatSize(loaded!)} of {formatSize(total!)}
+          </span>
+        </>
+      )}
+    </div>
+  );
+}
+
+/** Reads a response body, reporting the bytes read so far (at most once a frame). */
+async function readWithProgress(res: Response, onProgress: (loaded: number) => void, type?: string): Promise<Blob> {
+  const kind = type ?? res.headers.get("Content-Type") ?? "";
+  if (!res.body) return new Blob([await res.blob()], { type: kind });
+  const parts: Uint8Array[] = [];
+  let loaded = 0;
+  let frame = 0;
+  for (const reader = res.body.getReader(); ; ) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    parts.push(value);
+    loaded += value.byteLength;
+    if (!frame) {
+      frame = requestAnimationFrame(() => {
+        frame = 0;
+        onProgress(loaded);
+      });
+    }
+  }
+  cancelAnimationFrame(frame);
+  onProgress(loaded);
+  return new Blob(parts as BlobPart[], { type: kind });
+}
+
+/** Fetches the file whole, so how much has arrived can be shown, and hands back an object URL. */
+function useLoadedFile(url: string, enabled: boolean, type?: string) {
+  const [loaded, setLoaded] = useState(0);
+  const [blob, setBlob] = useState<Blob | null>(null);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    if (!enabled) return;
+    const controller = new AbortController();
+    fetch(url, { signal: controller.signal })
+      .then((res) => {
+        if (!res.ok) throw new Error(String(res.status));
+        return readWithProgress(res, setLoaded, type);
+      })
+      .then(setBlob, () => {
+        if (!controller.signal.aborted) setFailed(true);
+      });
+    return () => controller.abort();
+  }, [url, enabled, type]);
+  const src = useObjectUrl(blob);
+  return { src, loaded, failed };
+}
+
 function Unplayable({ what }: { what: string }) {
   return (
     <p className="max-w-sm px-6 text-center text-sm text-white/75">
@@ -52,6 +125,7 @@ const TEXT_PREVIEW_LIMIT = 512 * 1024;
 function TextPreview({ url, size }: { url: string; size: number }) {
   const [text, setText] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
+  const [loaded, setLoaded] = useState(0);
 
   useEffect(() => {
     if (size === 0) {
@@ -63,7 +137,7 @@ function TextPreview({ url, size }: { url: string; size: number }) {
     fetch(url, { headers: { Range: `bytes=0-${TEXT_PREVIEW_LIMIT - 1}` }, signal: controller.signal })
       .then((res) => {
         if (!res.ok) throw new Error(String(res.status));
-        return res.text();
+        return readWithProgress(res, setLoaded).then((b) => b.text());
       })
       .then(setText)
       .catch((e: unknown) => {
@@ -73,7 +147,7 @@ function TextPreview({ url, size }: { url: string; size: number }) {
   }, [url, size]);
 
   if (failed) return <p className="text-sm text-white/75">This file couldn't be loaded. Try downloading it instead.</p>;
-  if (text === null) return <p className="text-sm text-white/75">Loading…</p>;
+  if (text === null) return <Loading loaded={loaded} total={Math.min(size, TEXT_PREVIEW_LIMIT)} />;
   if (text === "") return <p className="text-sm text-white/75">This file is empty.</p>;
   return (
     <div className="flex h-full w-full max-w-5xl flex-col">
@@ -137,19 +211,36 @@ function VideoPlayer({
   const stream = isTransportStream(name);
   const streamFailed = useTransportStream(ref, url, stream);
   const [failed, setFailed] = useState(false);
+  // Until the first frame is in, and whenever playback stalls for more.
+  const [buffering, setBuffering] = useState(true);
   if (failed || streamFailed) return <Unplayable what="video" />;
   return (
-    <video
-      ref={ref}
-      src={stream ? undefined : url}
-      controls
-      autoPlay={autoPlay}
-      preload="metadata"
-      className="block h-full w-full bg-black"
-      onError={() => setFailed(true)}
-      onLoadedMetadata={(e) => onLoadedMetadata?.(e.currentTarget)}
-      onTimeUpdate={(e) => onTimeUpdate?.(e.currentTarget)}
-    />
+    <div className="relative h-full w-full">
+      <video
+        ref={ref}
+        src={stream ? undefined : url}
+        controls
+        autoPlay={autoPlay}
+        preload="metadata"
+        className="block h-full w-full bg-black"
+        onError={() => setFailed(true)}
+        onLoadedMetadata={(e) => {
+          // Not playing yet, so it may not fetch a frame until asked: ready enough.
+          if (!autoPlay) setBuffering(false);
+          onLoadedMetadata?.(e.currentTarget);
+        }}
+        onTimeUpdate={(e) => onTimeUpdate?.(e.currentTarget)}
+        onLoadedData={() => setBuffering(false)}
+        onCanPlay={() => setBuffering(false)}
+        onPlaying={() => setBuffering(false)}
+        onWaiting={() => setBuffering(true)}
+      />
+      {buffering && (
+        <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+          <Loading />
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -273,7 +364,7 @@ function ArchivePreview({
   const [gallery, setGallery] = useState(false);
   const [startAt, setStartAt] = useState<number | undefined>();
 
-  if (listing.isPending) return <p className="text-sm text-white/75">Reading the archive's index…</p>;
+  if (listing.isPending) return <Loading label="Reading the archive's index…" />;
   if (listing.error) return <p className="text-sm text-white/75">{listing.error.message}</p>;
 
   const files = listing.data.filter((e) => !e.dir);
@@ -484,7 +575,7 @@ function ZipImage({
   const page = useQuery(pageQuery(drive, archive, item));
   const src = useObjectUrl(page.data);
   if (page.error) return <Note>{page.error.message}</Note>;
-  if (!src) return <Note>Loading…</Note>;
+  if (!src) return <Loading />;
   return (
     <img
       src={src}
@@ -570,10 +661,10 @@ function ZipVideo({
       </button>
     );
   }
-  return (
-    <Note>
-      {stored ? "Loading video…" : `Unpacking video… ${formatSize(loaded)} of ${formatSize(item.compressed)}`}
-    </Note>
+  return stored ? (
+    <Loading label="Loading video…" />
+  ) : (
+    <Loading label="Unpacking video…" loaded={loaded} total={item.compressed} />
   );
 }
 
@@ -631,7 +722,7 @@ function SinglePage({
           draggable={false}
         />
       ) : (
-        <Note>Loading page…</Note>
+        <Loading label="Loading page…" />
       )}
       {image.isPending && src && (
         <span className="absolute rounded-md bg-black/60 px-3 py-1.5 text-sm text-white/90">Loading page…</span>
@@ -910,7 +1001,7 @@ function ComicPreview({
   });
   const pages = useMemo(() => readable(listing.data ?? [], false), [listing.data]);
 
-  if (listing.isPending) return <p className="text-sm text-white/75">Reading the comic's index…</p>;
+  if (listing.isPending) return <Loading label="Reading the comic's index…" />;
   if (listing.error) return <p className="text-sm text-white/75">{listing.error.message}</p>;
   if (pages.length === 0) return <p className="text-sm text-white/75">There are no pages in this file.</p>;
   return <ZipReader drive={drive} archive={entry} items={pages} pager={pager} idle={idle} />;
@@ -944,6 +1035,9 @@ function useIdle(root: RefObject<HTMLElement | null>): [boolean, () => void] {
   return [idle, wake];
 }
 
+/** PDFs up to this size are fetched whole first, with progress; bigger ones stream into the browser's viewer. */
+const PDF_IN_MEMORY = 200 * 1024 * 1024;
+
 /** What fills the stage for one file. Keyed by file, so each starts afresh. */
 function Stage({
   drive,
@@ -963,12 +1057,17 @@ function Stage({
   const [failed, setFailed] = useState(false);
   const queryClient = useQueryClient();
   const pictured = useRef(entry.thumb);
+  // Images, and PDFs small enough to hold in memory, are fetched here so progress can be shown.
+  const pdfInMemory = kind === "pdf" && entry.size <= PDF_IN_MEMORY;
+  const file = useLoadedFile(inlineUrl, kind === "image" || pdfInMemory, pdfInMemory ? "application/pdf" : undefined);
+  const [framed, setFramed] = useState(false);
 
   if (kind === "image") {
-    if (failed) return <Unplayable what="image" />;
+    if (failed || file.failed) return <Unplayable what="image" />;
+    if (!file.src) return <Loading loaded={file.loaded} total={entry.size} />;
     return (
       <img
-        src={inlineUrl}
+        src={file.src}
         alt={entry.name}
         className="max-h-full max-w-full object-contain"
         onError={() => setFailed(true)}
@@ -1002,7 +1101,25 @@ function Stage({
       </div>
     );
   }
-  if (kind === "pdf") return <iframe src={inlineUrl} title={entry.name} className="h-full w-full max-w-5xl bg-white" />;
+  if (kind === "pdf") {
+    if (file.failed) return <Unplayable what="PDF" />;
+    if (pdfInMemory && !file.src) return <Loading loaded={file.loaded} total={entry.size} />;
+    return (
+      <div className="relative flex h-full w-full max-w-5xl items-center justify-center">
+        <iframe
+          src={file.src ?? inlineUrl}
+          title={entry.name}
+          className="h-full w-full bg-white"
+          onLoad={() => setFramed(true)}
+        />
+        {!pdfInMemory && !framed && (
+          <div className="absolute inset-0 flex items-center justify-center bg-neutral-950">
+            <Loading />
+          </div>
+        )}
+      </div>
+    );
+  }
   if (kind === "text") return <TextPreview url={api.fileUrl(drive, entry.id)} size={entry.size} />;
   if (kind === "archive") return <ArchivePreview drive={drive} entry={entry} pager={pager} idle={idle} />;
   if (kind === "comic") return <ComicPreview drive={drive} entry={entry} pager={pager} idle={idle} />;

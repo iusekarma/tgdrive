@@ -203,9 +203,18 @@ image shown, `sendVideoFrame()` from a hidden second player seeking to
 `frameTime()` (so it doesn't matter where the user is watching), or, for
 MPEG-TS, `sendFrame()` from the player once it gets there.
 `regenerateThumbnail()` (**Regenerate thumbnail** in a file's menu) deletes
-it on the server and makes a new one from the file read back, leaving
-images the browser can't decode to the server. `useThumbnailVersion()`
+it on the server and makes a new one with `makeThumbnail()` (below): an
+image up to 50 MB on the server, so the browser downloads nothing. `useThumbnailVersion()`
 lets anything showing the old one load the new one.
+
+**Make thumbnails** in a folder's toolbar runs `makeThumbnail()` on each image
+and video there without one, one at a time. Images the server can thumbnail
+(up to 50 MB) are left to it, so the browser doesn't download them; others
+and videos are drawn from the server's copy, a video read only as far as its
+frame (`preload="metadata"`). An `AbortController` stops it when the folder,
+drive or search changes; closing the tab stops it anyway. Files whose
+thumbnail is cached on the server count as having one, and the server sends
+those to Telegram itself.
 
 The same decode yields the file's details (dimensions, length, EXIF date
 and camera, last-modified time), sent with one `PUT /files/{id}/info`.
