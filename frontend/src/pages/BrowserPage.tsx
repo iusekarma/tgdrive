@@ -1,6 +1,7 @@
 import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowLeft,
+  BookOpen,
   ChevronRight,
   Download,
   Folder,
@@ -15,6 +16,7 @@ import {
   Network,
   PanelRight,
   Pencil,
+  Play,
   RefreshCw,
   Search,
   ShieldPlus,
@@ -99,15 +101,36 @@ function Thumb({ drive, entry, large = false }: { drive: string; entry: Entry; l
   }, [drive, entry.id, entry.thumb, wanted, version]);
 
   const box = large
-    ? "flex aspect-square w-full items-center justify-center overflow-hidden rounded-t-lg bg-ink/[0.04]"
-    : "flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-md";
+    ? "relative flex aspect-square w-full items-center justify-center overflow-hidden rounded-t-lg bg-ink/[0.04]"
+    : "relative flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-md";
   return (
     <span ref={ref} className={`${box} ${url && !large ? "bg-ink/[0.04]" : ""}`}>
       {url ? (
-        <img src={url} alt="" className="h-full w-full object-cover" draggable={false} />
+        <>
+          <img src={url} alt="" className="h-full w-full object-contain" draggable={false} />
+          <KindBadge entry={entry} large={large} />
+        </>
       ) : (
         <EntryIcon entry={entry} size={large ? 40 : 20} />
       )}
+    </span>
+  );
+}
+
+const BADGES = { video: { Icon: Play, label: "Video" }, comic: { Icon: BookOpen, label: "Comic" } } as const;
+
+/** On a thumbnail, says it isn't simply a picture: a video, or a comic's cover. */
+function KindBadge({ entry, large }: { entry: Entry; large: boolean }) {
+  const kind = previewKind(entry.name, entry.size);
+  if (kind !== "video" && kind !== "comic") return null;
+  const { Icon, label } = BADGES[kind];
+  return (
+    <span
+      title={label}
+      className={`absolute flex items-center rounded bg-black/65 text-white ${large ? "bottom-1.5 left-1.5 gap-1 px-1.5 py-0.5 text-xs" : "bottom-0.5 left-0.5 p-0.5"}`}
+    >
+      <Icon size={large ? 12 : 9} className={kind === "video" ? "fill-current" : ""} aria-hidden="true" />
+      {large ? label : <span className="sr-only">{label}</span>}
     </span>
   );
 }
@@ -388,9 +411,9 @@ export default function BrowserPage() {
     }
   }
 
-  /** Images and videos; others have nothing to draw one from. */
+  /** Images, videos and comics; others have nothing to draw one from. */
   const canThumbnail = (entry: Entry) =>
-    entry.kind === "file" && ["image", "video"].includes(previewKind(entry.name, entry.size) ?? "");
+    entry.kind === "file" && ["image", "video", "comic"].includes(previewKind(entry.name, entry.size) ?? "");
 
   const missingThumbnails = searching ? [] : entries.filter((e) => canThumbnail(e) && !e.thumb);
 
@@ -649,7 +672,7 @@ export default function BrowserPage() {
               missingThumbnails.length > 0 && (
                 <Button
                   onClick={() => void makeThumbnails()}
-                  title={`Make thumbnails for the ${missingThumbnails.length} images and videos here that have none`}
+                  title={`Make thumbnails for the ${missingThumbnails.length} images, videos and comics here that have none`}
                 >
                   <Images size={16} />
                   Make thumbnails

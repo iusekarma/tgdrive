@@ -191,9 +191,11 @@ revokes the URLs.
 has one, or it is an image of 50 MB or less (which the server can make on
 demand).
 
-**Making.** After an upload, `sendDetails()` draws an image, or a video
+**Making.** After an upload, `sendDetails()` draws an image, a video
 frame at `frameTime()` (a tenth of the way in, at least 3 s and at most
-3 min, never past halfway), onto a canvas scaled to 320 px and `PUT`s it
+3 min, never past halfway), or a comic's (.cbz) first page in name order,
+read from the zip's index with `zip.ts` (which takes a local `Blob` as
+well as a URL), onto a canvas scaled to 320 px and `PUT`s it
 as WebP (PNG where WebP encoding is unsupported). The server re-encodes
 whatever it receives. This means Telegram is never asked for a file just to
 thumbnail it.
@@ -207,14 +209,18 @@ it on the server and makes a new one with `makeThumbnail()` (below): an
 image up to 50 MB on the server, so the browser downloads nothing. `useThumbnailVersion()`
 lets anything showing the old one load the new one.
 
-**Make thumbnails** in a folder's toolbar runs `makeThumbnail()` on each image
-and video there without one, one at a time. Images the server can thumbnail
-(up to 50 MB) are left to it, so the browser doesn't download them; others
-and videos are drawn from the server's copy, a video read only as far as its
-frame (`preload="metadata"`). An `AbortController` stops it when the folder,
+**Make thumbnails** in a folder's toolbar runs `makeThumbnail()` on each image,
+video and comic there without one, one at a time. Images the server can thumbnail
+(up to 50 MB) are left to it, so the browser doesn't download them; others,
+videos and comics are drawn from the server's copy, a video read only as far as its
+frame (`preload="metadata"`), a comic only its index and first page. An `AbortController` stops it when the folder,
 drive or search changes; closing the tab stops it anyway. Files whose
 thumbnail is cached on the server count as having one, and the server sends
 those to Telegram itself.
+
+In the listing, thumbnails are fitted inside their box (`object-contain`),
+and a video's or comic's carries a small badge (`KindBadge`) so it isn't
+mistaken for a picture.
 
 The same decode yields the file's details (dimensions, length, EXIF date
 and camera, last-modified time), sent with one `PUT /files/{id}/info`.

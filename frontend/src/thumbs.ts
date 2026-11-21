@@ -3,6 +3,7 @@ import { useSyncExternalStore } from "react";
 import { api, type Entry, type FileInfo } from "./api";
 import { readExif, seconds } from "./fileinfo";
 import { previewKind } from "./format";
+import { comicPages, listZip, pageType, readZipEntry, type ZipSource } from "./zip";
 
 /** Matches the server: larger images are not fetched from Telegram just to thumbnail them. */
 const SERVER_SOURCE_MAX = 50 * 1024 * 1024;
@@ -137,6 +138,14 @@ async function fromImage(file: Blob): Promise<Look> {
   }
 }
 
+/** A comic's cover: its first page, read from the zip without fetching the rest. */
+async function fromComic(source: ZipSource, size: number, signal?: AbortSignal): Promise<Blob | null> {
+  const [first] = comicPages(await listZip(source, size, signal));
+  if (!first) return null;
+  const page = await readZipEntry(source, size, first, pageType(first.path), signal);
+  return (await fromImage(page)).image;
+}
+
 /** Draws the frame the video element is showing. */
 function captureFrame(video: HTMLVideoElement): Promise<Blob | null> {
   if (!video.videoWidth || !video.videoHeight) return Promise.resolve(null);
@@ -222,7 +231,7 @@ export async function sendDetails(
   const kind = previewKind(file.name, file.size);
   const k = key(drive, id);
   let made = () => {};
-  if (kind === "image" || kind === "video") making.set(k, new Promise<void>((resolve) => (made = resolve)));
+  if (kind === "image" || kind === "video" || kind === "comic") making.set(k, new Promise<void>((resolve) => (made = resolve)));
   let look: Look = { image: null, info: {} };
   let thumb = false;
   try {
@@ -230,6 +239,7 @@ export async function sendDetails(
       if (kind === "image") look = await fromImage(file);
       else if (kind === "video") look = await fromVideo(file);
       else if (kind === "audio") look = await fromAudio(file);
+      else if (kind === "comic") look = { image: await fromComic(file, file.size), info: {} };
     } catch {
       // Not decodable here; the file's own date is still worth keeping.
     }
@@ -284,7 +294,7 @@ export function sendVideoFrame(drive: string, id: string): Promise<boolean> {
 
 /** Throws the file's thumbnail away and makes a new one, as makeThumbnail()
  * does: images up to 50 MB on the server, which fetches the file itself, so
- * the browser downloads nothing; videos and larger images here. Resolves to
+ * the browser downloads nothing; videos, comics and larger images here. Resolves to
  * whether there is one now. */
 export async function regenerateThumbnail(drive: string, entry: Entry): Promise<boolean> {
   const k = key(drive, entry.id);
@@ -302,8 +312,9 @@ export async function regenerateThumbnail(drive: string, entry: Entry): Promise<
 }
 
 /** For a file that has no thumbnail: images the server can thumbnail are left
- * to it, so the browser doesn't download them; larger ones and videos are
- * drawn here from the server's copy (a video only as far as the frame).
+ * to it, so the browser doesn't download them; larger ones, videos and comics
+ * are drawn here from the server's copy (a video only as far as the frame, a
+ * comic only its index and first page).
  * Resolves to whether there is one now. Stops early when `signal` aborts. */
 export async function makeThumbnail(drive: string, entry: Entry, signal: AbortSignal): Promise<boolean> {
   const kind = previewKind(entry.name, entry.size);
@@ -315,6 +326,8 @@ export async function makeThumbnail(drive: string, entry: Entry, signal: AbortSi
       if (res.ok) image = (await fromImage(await res.blob())).image;
     } else if (kind === "video") {
       image = (await fromVideo(api.fileUrl(drive, entry.id, true), signal)).image;
+    } else if (kind === "comic") {
+      image = await fromComic(api.fileUrl(drive, entry.id), entry.size, signal);
     }
   } catch {
     return false;   // not decodable here, or stopped

@@ -29,13 +29,21 @@ const DIRECTORY_MAX = 64 * 1024 * 1024;
 
 export class ZipError extends Error {}
 
+/** A URL on this server (read with range requests), or a local copy. */
+export type ZipSource = string | Blob;
+
 async function readRange(
-  url: string,
+  url: ZipSource,
   start: number,
   end: number,
   signal?: AbortSignal,
   onProgress?: (loaded: number) => void,
 ): Promise<DataView<ArrayBuffer>> {
+  if (typeof url !== "string") {
+    const buf = await url.slice(start, end).arrayBuffer();
+    onProgress?.(buf.byteLength);
+    return new DataView(buf);
+  }
   const res = await fetch(url, { headers: { Range: `bytes=${start}-${end - 1}` }, signal });
   if (!res.ok) throw new Error(`The file couldn't be read (${res.status}).`);
   const buf = onProgress && res.body ? await readCounting(res.body, onProgress) : await res.arrayBuffer();
@@ -124,7 +132,7 @@ function parseDirectory(v: DataView, count: number): ZipEntry[] {
 }
 
 /** Every entry in the zip at `url` (which must honour Range requests). */
-export async function listZip(url: string, size: number, signal?: AbortSignal): Promise<ZipEntry[]> {
+export async function listZip(url: ZipSource, size: number, signal?: AbortSignal): Promise<ZipEntry[]> {
   if (size < 22) throw new ZipError("This isn't a zip file.");
   const tailStart = Math.max(0, size - TAIL);
   const tail = await readRange(url, tailStart, size, signal);
@@ -179,7 +187,7 @@ function checkReadable(entry: ZipEntry) {
 
 /** Where the entry's data starts in the zip, from its local header: one small
  * range request. A stored (uncompressed) entry is then just a slice of the zip. */
-export async function zipEntryStart(url: string, entry: ZipEntry, signal?: AbortSignal): Promise<number> {
+export async function zipEntryStart(url: ZipSource, entry: ZipEntry, signal?: AbortSignal): Promise<number> {
   checkReadable(entry);
   const v = await readRange(url, entry.offset, entry.offset + 30, signal);
   if (v.byteLength < 30 || v.getUint32(0, true) !== LOCAL) throw new ZipError("The archive is damaged.");
@@ -190,7 +198,7 @@ export async function zipEntryStart(url: string, entry: ZipEntry, signal?: Abort
  * header is unusually long). Stored and deflated entries only, the two that
  * comic and photo archives use. `onProgress` gets the bytes read so far. */
 export async function readZipEntry(
-  url: string,
+  url: ZipSource,
   size: number,
   entry: ZipEntry,
   type = "",
@@ -214,3 +222,20 @@ export async function readZipEntry(
     (b) => new Blob([b], { type }),
   );
 }
+
+// --- comics -------------------------------------------------------------------
+
+const PAGE_TYPES: Record<string, string> = {
+  jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", gif: "image/gif",
+  webp: "image/webp", avif: "image/avif", bmp: "image/bmp",
+};
+/** The image type of a page, or undefined for anything that isn't one. */
+export const pageType = (path: string): string | undefined =>
+  PAGE_TYPES[path.slice(path.lastIndexOf(".") + 1).toLowerCase()];
+/** macOS resource forks and dot files, which archivers add and nobody means to look at. */
+export const junk = (path: string) => /(^|\/)(__MACOSX\/|\.)/.test(path);
+export const byName = (a: string, b: string) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" });
+
+/** A comic's page images, in reading (name) order. */
+export const comicPages = (entries: ZipEntry[]): ZipEntry[] =>
+  entries.filter((e) => !e.dir && !junk(e.path) && pageType(e.path)).sort((a, b) => byName(a.path, b.path));

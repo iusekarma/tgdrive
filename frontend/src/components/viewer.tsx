@@ -12,7 +12,7 @@ import { api, type Entry, type FileInfo } from "../api";
 import { seconds, useLearn } from "../fileinfo";
 import { formatDate, formatSize, isTransportStream, previewKind } from "../format";
 import { frameTime, sendFrame, sendPicture, sendVideoFrame } from "../thumbs";
-import { listZip, readZipEntry, zipEntryStart, type ZipEntry } from "../zip";
+import { byName, junk, listZip, pageType, readZipEntry, zipEntryStart, type ZipEntry } from "../zip";
 import { EntryDetails } from "./details";
 
 const DARK_BUTTON = "inline-flex rounded-md p-2 text-white/75 hover:bg-white/10 hover:text-white";
@@ -297,7 +297,6 @@ interface ZipFolder {
 
 const parentOf = (path: string) => path.slice(0, Math.max(0, path.lastIndexOf("/")));
 const baseName = (path: string) => path.slice(path.lastIndexOf("/") + 1);
-const byName = (a: string, b: string) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" });
 
 /** Folders by path ("" is the top), including ones only implied by a file's path. */
 function buildTree(entries: ZipEntry[]): Map<string, ZipFolder> {
@@ -320,14 +319,7 @@ function buildTree(entries: ZipEntry[]): Map<string, ZipFolder> {
   return tree;
 }
 
-const PAGE_TYPES: Record<string, string> = {
-  jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", gif: "image/gif",
-  webp: "image/webp", avif: "image/avif", bmp: "image/bmp",
-};
-const pageType = (path: string) => PAGE_TYPES[path.slice(path.lastIndexOf(".") + 1).toLowerCase()];
 const isZipVideo = (e: ZipEntry) => !pageType(e.path) && previewKind(baseName(e.path), e.size) === "video";
-/** macOS resource forks and dot files, which archivers add and nobody means to look at. */
-const junk = (path: string) => /(^|\/)(__MACOSX\/|\.)/.test(path);
 
 /** What the reader steps through, in name order: page images, and videos too if asked. */
 function readable(entries: ZipEntry[], videos: boolean): ZipEntry[] {
