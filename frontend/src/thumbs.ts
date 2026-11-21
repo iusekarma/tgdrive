@@ -1,3 +1,5 @@
+import { useSyncExternalStore } from "react";
+
 import { api, type Entry, type FileInfo } from "./api";
 import { readExif, seconds } from "./fileinfo";
 import { previewKind } from "./format";
@@ -43,6 +45,26 @@ export function cachedThumbnail(drive: string, id: string): string | null | unde
   return cache.get(key(drive, id));
 }
 
+// Bumped when a thumbnail changes under a component already showing one.
+const versions = new Map<string, number>();
+const listeners = new Set<() => void>();
+
+function changed(k: string) {
+  versions.set(k, (versions.get(k) ?? 0) + 1);
+  for (const listener of listeners) listener();
+}
+
+/** Changes when this file's thumbnail is replaced, so whatever shows it loads it again. */
+export function useThumbnailVersion(drive: string, id: string): number {
+  return useSyncExternalStore(
+    (listener) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    () => versions.get(key(drive, id)) ?? 0,
+  );
+}
+
 /** Resolves to an object URL, or null when there is no thumbnail. */
 export async function loadThumbnail(drive: string, id: string): Promise<string | null> {
   const k = key(drive, id);
@@ -72,14 +94,19 @@ function remember(drive: string, id: string, image: Blob) {
   const old = cache.get(k);
   if (old) URL.revokeObjectURL(old);
   cache.set(k, URL.createObjectURL(image));
+  changed(k);
+}
+
+function forget(k: string) {
+  const old = cache.get(k);
+  if (old) URL.revokeObjectURL(old);
+  cache.delete(k);
 }
 
 /** Drop decrypted thumbnails from memory, for one drive or all of them. */
 export function forgetThumbnails(drive?: string) {
-  for (const [k, url] of cache) {
-    if (drive !== undefined && !k.startsWith(`${drive}\n`)) continue;
-    if (url) URL.revokeObjectURL(url);
-    cache.delete(k);
+  for (const k of [...cache.keys()]) {
+    if (drive === undefined || k.startsWith(`${drive}\n`)) forget(k);
   }
 }
 
@@ -111,29 +138,40 @@ async function fromImage(file: Blob): Promise<Look> {
 }
 
 /** Draws the frame the video element is showing. */
-export function captureFrame(video: HTMLVideoElement): Promise<Blob | null> {
+function captureFrame(video: HTMLVideoElement): Promise<Blob | null> {
   if (!video.videoWidth || !video.videoHeight) return Promise.resolve(null);
   return toBlob(video, video.videoWidth, video.videoHeight);
 }
 
-/** Loads local media far enough to answer `read`, then lets it go. */
+/** Where a video's thumbnail is taken: a tenth of the way in, but at least
+ * 3 s and at most 3 min, so it's a real scene rather than a black title card
+ * or a logo. Never past halfway, for short clips. */
+export function frameTime(duration: number): number {
+  if (!Number.isFinite(duration) || duration <= 0) return 0;
+  return Math.min(Math.max(duration * 0.1, 3), 180, duration / 2);
+}
+
+/** Loads media (a local copy, or a URL on this server) far enough to answer
+ * `read`, then lets it go. */
 function fromMedia(
-  file: Blob,
+  source: Blob | string,
   tag: "video" | "audio",
   read: (media: HTMLMediaElement, done: (look: Look) => void, info: FileInfo) => void,
 ): Promise<Look> {
   return new Promise((resolve) => {
-    const url = URL.createObjectURL(file);
+    const local = typeof source !== "string";
+    const url = local ? URL.createObjectURL(source) : source;
     const media = document.createElement(tag);
     const info: FileInfo = {};
     const done = (look: Look) => {
       clearTimeout(timer);
       media.removeAttribute("src");
       media.load();
-      URL.revokeObjectURL(url);
+      if (local) URL.revokeObjectURL(url);
       resolve(look);
     };
-    const timer = setTimeout(() => done({ image: null, info }), 15_000);
+    // From the server, the frame may first have to come from Telegram.
+    const timer = setTimeout(() => done({ image: null, info }), local ? 15_000 : 45_000);
     media.muted = true;
     media.preload = tag === "video" ? "auto" : "metadata";
     media.onerror = () => done({ image: null, info });
@@ -142,14 +180,14 @@ function fromMedia(
   });
 }
 
-/** Seeks to about 10% in (at most 30 s), so the frame isn't a black title card. */
-const fromVideo = (file: Blob) =>
-  fromMedia(file, "video", (media, done, info) => {
+/** Seeks to frameTime() and draws that frame. */
+const fromVideo = (source: Blob | string) =>
+  fromMedia(source, "video", (media, done, info) => {
     const video = media as HTMLVideoElement;
     video.onloadedmetadata = () => {
       Object.assign(info, { width: video.videoWidth || undefined, height: video.videoHeight || undefined });
       info.duration = seconds(video.duration);
-      video.currentTime = Number.isFinite(video.duration) ? Math.min(video.duration * 0.1, 30) : 0;
+      video.currentTime = frameTime(video.duration);
     };
     video.onseeked = () =>
       void captureFrame(video).then(
@@ -208,15 +246,66 @@ export async function sendDetails(
   return { thumb, info };
 }
 
-/** For videos uploaded before thumbnails existed: saves the frame being watched. */
-export async function sendFrame(drive: string, id: string, video: HTMLVideoElement): Promise<boolean> {
+async function send(drive: string, id: string, image: Blob | null): Promise<boolean> {
+  if (!image) return false;
   try {
-    const image = await captureFrame(video);
-    if (!image) return false;
     await api.putThumbnail(drive, id, image);
     remember(drive, id, image);
     return true;
   } catch {
     return false;
   }
+}
+
+/** For a file opened in the viewer without a thumbnail: saves one from the
+ * image being shown. */
+export function sendPicture(drive: string, id: string, img: HTMLImageElement): Promise<boolean> {
+  if (!img.naturalWidth || !img.naturalHeight) return Promise.resolve(false);
+  return toBlob(img, img.naturalWidth, img.naturalHeight).then((image) => send(drive, id, image), () => false);
+}
+
+/** Saves the frame a video element is showing (one the browser can only play
+ * through mpegts.js, which a second element can't seek on its own). */
+export function sendFrame(drive: string, id: string, video: HTMLVideoElement): Promise<boolean> {
+  return captureFrame(video).then((image) => send(drive, id, image), () => false);
+}
+
+/** Saves a frame frameTime() into a video on the server, read with a second,
+ * hidden player, so it doesn't matter where the one being watched is. */
+export function sendVideoFrame(drive: string, id: string): Promise<boolean> {
+  return fromVideo(api.fileUrl(drive, id, true)).then((look) => send(drive, id, look.image), () => false);
+}
+
+/** Throws the file's thumbnail away and makes a new one: from the file read
+ * back from the server for images and videos the browser can decode, or by
+ * the server for other images. Resolves to whether there is one now. */
+export async function regenerateThumbnail(drive: string, entry: Entry): Promise<boolean> {
+  const kind = previewKind(entry.name, entry.size);
+  const k = key(drive, entry.id);
+  let made = () => {};
+  making.set(k, new Promise<void>((resolve) => (made = resolve)));
+  let image: Blob | null = null;
+  try {
+    await api.deleteThumbnail(drive, entry.id);
+    forget(k);
+    try {
+      if (kind === "image") {
+        const res = await fetch(api.fileUrl(drive, entry.id, true));
+        if (res.ok) image = (await fromImage(await res.blob())).image;
+      } else if (kind === "video") {
+        image = (await fromVideo(api.fileUrl(drive, entry.id, true))).image;
+      }
+    } catch {
+      // Not decodable here.
+    }
+    if (image && (await send(drive, entry.id, image))) return true;
+  } catch {
+    return false;
+  } finally {
+    making.delete(k);
+    made();
+    changed(k);
+  }
+  // An image this browser can't decode: the server may still manage.
+  return hasThumbnail({ ...entry, thumb: false }) && (await loadThumbnail(drive, entry.id)) !== null;
 }

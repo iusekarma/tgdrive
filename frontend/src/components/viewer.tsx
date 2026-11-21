@@ -11,7 +11,7 @@ import {
 import { api, type Entry, type FileInfo } from "../api";
 import { seconds, useLearn } from "../fileinfo";
 import { formatDate, formatSize, isTransportStream, previewKind } from "../format";
-import { sendFrame } from "../thumbs";
+import { frameTime, sendFrame, sendPicture, sendVideoFrame } from "../thumbs";
 import { listZip, readZipEntry, zipEntryStart, type ZipEntry } from "../zip";
 import { EntryDetails } from "./details";
 
@@ -153,8 +153,9 @@ function VideoPlayer({
   );
 }
 
-/** Videos uploaded before thumbnails existed get one from the first frame
- * watched past the 2 s mark, so it isn't a black title card. */
+/** A video opened without a thumbnail gets one, from a frame frameTime() in
+ * read by a hidden second player. Transport streams, which only play
+ * through mpegts.js, take it from this player once it gets there instead. */
 function VideoPreview({
   drive,
   entry,
@@ -168,23 +169,29 @@ function VideoPreview({
 }) {
   const queryClient = useQueryClient();
   const captured = useRef(entry.thumb);
+  const stream = isTransportStream(entry.name);
+  const saved = (sent: boolean) => {
+    if (sent) void queryClient.invalidateQueries({ queryKey: ["nodes", drive] });
+  };
   return (
     <VideoPlayer
       url={url}
       name={entry.name}
-      onLoadedMetadata={(video) =>
+      onLoadedMetadata={(video) => {
         learn({
           width: video.videoWidth || undefined,
           height: video.videoHeight || undefined,
           duration: seconds(video.duration),
-        })
-      }
-      onTimeUpdate={(video) => {
-        if (captured.current || video.currentTime < Math.min(2, video.duration / 2)) return;
-        captured.current = true;
-        void sendFrame(drive, entry.id, video).then((sent) => {
-          if (sent) void queryClient.invalidateQueries({ queryKey: ["nodes", drive] });
         });
+        // Once this player has what it needs to start, so the two don't compete for it.
+        if (captured.current || stream) return;
+        captured.current = true;
+        void sendVideoFrame(drive, entry.id).then(saved);
+      }}
+      onTimeUpdate={(video) => {
+        if (captured.current || !stream || video.currentTime < frameTime(video.duration)) return;
+        captured.current = true;
+        void sendFrame(drive, entry.id, video).then(saved);
       }}
     />
   );
@@ -954,6 +961,8 @@ function Stage({
   // The browser is loading the file to show it anyway, so what it finds out is kept.
   const learn = useLearn(drive, entry.id);
   const [failed, setFailed] = useState(false);
+  const queryClient = useQueryClient();
+  const pictured = useRef(entry.thumb);
 
   if (kind === "image") {
     if (failed) return <Unplayable what="image" />;
@@ -963,7 +972,16 @@ function Stage({
         alt={entry.name}
         className="max-h-full max-w-full object-contain"
         onError={() => setFailed(true)}
-        onLoad={(e) => learn({ width: e.currentTarget.naturalWidth, height: e.currentTarget.naturalHeight })}
+        onLoad={(e) => {
+          const img = e.currentTarget;
+          learn({ width: img.naturalWidth, height: img.naturalHeight });
+          // Opened without a thumbnail: the image is here, so make it one.
+          if (pictured.current) return;
+          pictured.current = true;
+          void sendPicture(drive, entry.id, img).then((sent) => {
+            if (sent) void queryClient.invalidateQueries({ queryKey: ["nodes", drive] });
+          });
+        }}
       />
     );
   }

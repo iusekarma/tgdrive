@@ -14,6 +14,7 @@ import {
   Network,
   PanelRight,
   Pencil,
+  RefreshCw,
   Search,
   ShieldPlus,
   Trash2,
@@ -39,7 +40,14 @@ import { Viewer } from "../components/viewer";
 import { Button, ErrorNote, ICON_BUTTON, Menu, MenuItem, PageHeader, useSavedView, ViewToggle } from "../components/ui";
 import { pickedFromInput, readDropped, useUploads, type Picked } from "../components/uploads";
 import { driveUrl, formatDate, formatSize, previewKind } from "../format";
-import { cachedThumbnail, forgetThumbnails, hasThumbnail, loadThumbnail } from "../thumbs";
+import {
+  cachedThumbnail,
+  forgetThumbnails,
+  hasThumbnail,
+  loadThumbnail,
+  regenerateThumbnail,
+  useThumbnailVersion,
+} from "../thumbs";
 
 type Open =
   | { type: "newFolder" }
@@ -64,6 +72,7 @@ function Thumb({ drive, entry, large = false }: { drive: string; entry: Entry; l
   const wanted = hasThumbnail(entry);
   const [url, setUrl] = useState<string | null | undefined>(() => (wanted ? cachedThumbnail(drive, entry.id) : null));
   const ref = useRef<HTMLSpanElement>(null);
+  const version = useThumbnailVersion(drive, entry.id);
 
   useEffect(() => {
     if (!wanted) return setUrl(null);
@@ -85,7 +94,7 @@ function Thumb({ drive, entry, large = false }: { drive: string; entry: Entry; l
       live = false;
       observer.disconnect();
     };
-  }, [drive, entry.id, entry.thumb, wanted]);
+  }, [drive, entry.id, entry.thumb, wanted, version]);
 
   const box = large
     ? "flex aspect-square w-full items-center justify-center overflow-hidden rounded-t-lg bg-ink/[0.04]"
@@ -368,6 +377,17 @@ export default function BrowserPage() {
     }
   }
 
+  /** Images and videos; others have nothing to draw one from. */
+  const canThumbnail = (entry: Entry) =>
+    entry.kind === "file" && ["image", "video"].includes(previewKind(entry.name, entry.size) ?? "");
+
+  async function remakeThumbnail(entry: Entry) {
+    setNotice(null);
+    const made = await regenerateThumbnail(drive, entry);
+    void refresh();
+    if (!made) setNotice(`A thumbnail couldn't be made for ${entry.name}.`);
+  }
+
   function itemMenu(entry: Entry) {
     return (
       <Menu label={`More actions for ${entry.name}`}>
@@ -417,6 +437,17 @@ export default function BrowserPage() {
                 <Info size={16} />
                 Details
               </MenuItem>
+              {canThumbnail(entry) && (
+                <MenuItem
+                  onSelect={() => {
+                    closeMenu();
+                    void remakeThumbnail(entry);
+                  }}
+                >
+                  <RefreshCw size={16} />
+                  Regenerate thumbnail
+                </MenuItem>
+              )}
               <MenuItem onSelect={pick({ type: "rename", entry })}>
                 <Pencil size={16} />
                 Rename

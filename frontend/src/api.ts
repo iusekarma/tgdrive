@@ -246,6 +246,8 @@ export const api = {
     const res = await fetch(`/api${drivePath(drive)}/files/${id}/thumbnail`, { method: "PUT", body: image });
     if (!res.ok) throw new ApiError(res.status, `Thumbnail upload failed (${res.status}).`);
   },
+  /** Forgets the thumbnail, to make a new one. */
+  deleteThumbnail: (drive: string, id: string) => request<void>("DELETE", `${drivePath(drive)}/files/${id}/thumbnail`),
 };
 
 /** Sends `body`, the file from `offset` on, to an upload made with api.startUpload.

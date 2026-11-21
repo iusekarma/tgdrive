@@ -769,7 +769,8 @@ async def download_zip(zip_id: str, session: Session = Depends(unlocked_vault),
 @router.get("/drives/{name}/files/{node_id}/thumbnail")
 async def get_thumbnail(node_id: str, drive: Drive = Depends(unlocked_drive), store: Storage = Depends(get_store)):
     """A 320px WebP. Small images get one made on first request; anything
-    else has one only if a browser sent it. 404 means show an icon."""
+    else has one only if a browser sent it. 404 means show an icon; 503
+    means it is only in Telegram and Telegram failed, so try again later."""
     data = await store.thumbnail(drive, node_id)
     if data is None:
         raise HTTPException(404, "no thumbnail")
@@ -804,6 +805,15 @@ async def put_thumbnail(node_id: str, request: Request, drive: Drive = Depends(u
         if len(data) > thumbs.UPLOAD_MAX:
             raise HTTPException(413, "thumbnail is too large")
     await store.set_thumbnail(drive, node_id, bytes(data))
+    return Response(status_code=204)
+
+
+@router.delete("/drives/{name}/files/{node_id}/thumbnail", status_code=204)
+async def delete_thumbnail(node_id: str, drive: Drive = Depends(unlocked_drive),
+                           store: Storage = Depends(get_store)):
+    """Forgets the thumbnail, to make a new one: the browser sends it, or for
+    an image the next GET makes it."""
+    await store.remove_thumbnail(drive, node_id)
     return Response(status_code=204)
 
 
@@ -884,7 +894,8 @@ async def lifespan(app: FastAPI):
                     backup_passphrase=cfg.backup_passphrase, thumb_dir=cfg.thumb_dir,
                     thumb_cache_bytes=cfg.thumb_cache_mb * 1024 * 1024 if cfg.thumb_cache_mb else None,
                     blob_cache_bytes=cfg.chunk_cache_mb * 1024 * 1024,
-                    pack_dir=cfg.pack_dir, pack_max_file=cfg.pack_max_file, pack_wait=cfg.pack_wait)
+                    pack_dir=cfg.pack_dir, pack_max_file=cfg.pack_max_file, pack_wait=cfg.pack_wait,
+                    thumb_pack_wait=cfg.thumb_pack_wait)
     removed = await store.cleanup_incomplete()
     if removed:
         log.info("removed %d interrupted upload(s)", removed)
@@ -892,6 +903,9 @@ async def lifespan(app: FastAPI):
     if waiting:
         log.info("%d small file(s) from before the restart are waiting to be sent", waiting)
     store.sweep_thumbnails()
+    queued = store.resume_thumbnails()
+    if queued:
+        log.info("%d cached thumbnail(s) are waiting to be sent to the channel", queued)
     if not store.vault_exists():
         log.warning("tgdrive is not set up yet: open the web UI or run `python -m app.cli init`")
     backup = BackupScheduler(store.backup, debounce=cfg.backup_debounce)

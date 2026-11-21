@@ -28,7 +28,8 @@ services:
       # The database. An empty folder is fine: on first start it is restored
       # from the snapshot pinned in the Telegram channel.
       - ./backend/data:/data
-      # Thumbnails. Disposable; capped by TGDRIVE_THUMB_CACHE_MB.
+      # Thumbnails, cached. Disposable once sent to the channel (within a
+      # minute or so); capped by TGDRIVE_THUMB_CACHE_MB.
       - tgdrive-cache:/cache
 
     # On stop the server uploads a last database snapshot to Telegram.

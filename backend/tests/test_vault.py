@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import sqlite3
@@ -311,6 +312,7 @@ class ThumbnailTest(Base):
         for i, nid in enumerate(ids):
             await s.thumbnail(d, nid)
             os.utime(Path(self.thumb_dir, f"{nid}.thumb"), (1000 + i, 1000 + i))
+        await s.flush_thumbnails()                   # only those in Telegram can be evicted
         one = Path(self.thumb_dir, f"{ids[0]}.thumb").stat().st_size
         await s.thumbnail(d, ids[0])                 # shown again: now the most recent
         s.thumb_cache_bytes = int(one * 4.5)         # room for four, so a fifth evicts
@@ -320,6 +322,88 @@ class ThumbnailTest(Base):
         self.assertEqual(kept, sorted([ids[0], ids[2], ids[3], extra]))   # p1 went; p0 was shown again
         self.assertEqual(s._thumb_total, sum(p.stat().st_size for p in Path(self.thumb_dir).iterdir()))
         self.assertTrue(await s.thumbnail(d, ids[1]))                # an evicted image comes back
+
+    async def test_kept_in_telegram_in_packs_of_their_own(self):
+        s, d = self.store, self.drive
+        ids = [await s.upload(d, None, f"clip{i}.mp4", gen(os.urandom(100))) for i in range(3)]
+        files = self.blob_count()
+        for nid in ids:
+            await s.set_thumbnail(d, nid, image_bytes("PNG", (640, 360)))
+        shown = {nid: await s.thumbnail(d, nid) for nid in ids}
+        self.assertEqual(self.blob_count(), files)   # waiting, not sent one by one
+        await s.flush_thumbnails()
+        self.assertEqual(self.blob_count(), files + 1)
+        rows = s.conn.execute("SELECT DISTINCT message_id FROM thumbs").fetchall()
+        self.assertEqual(len(rows), 1)
+
+        # The cache is lost: the first miss fetches the pack and refills it all.
+        for name in os.listdir(self.thumb_dir):
+            s._unlink_thumb(os.path.join(self.thumb_dir, name))
+        self.assertTrue(s.stat(d, ids[0]).thumb)
+        gets = []
+        original = s.transport.get
+
+        async def counting(ref):
+            gets.append(ref)
+            return await original(ref)
+
+        s.transport.get = counting
+        self.assertEqual(await asyncio.gather(*(s.thumbnail(d, nid) for nid in ids)), list(shown.values()))
+        self.assertEqual(len(gets), 1)
+        self.assertEqual(sorted(os.listdir(self.thumb_dir)), sorted(f"{n}.thumb" for n in ids))
+
+        # The pack goes with the last file whose thumbnail is in it.
+        await s.delete(d, ids[0])
+        await s.delete(d, ids[1])
+        self.assertEqual(self.blob_count(), files - 2 + 1)
+        await s.delete(d, ids[2])
+        self.assertEqual(self.blob_count(), files - 3)
+
+    async def test_replaced_and_removed(self):
+        s, d = self.store, self.drive
+        nid = await s.upload(d, None, "clip.mp4", gen(os.urandom(100)))
+        files = self.blob_count()
+        await s.set_thumbnail(d, nid, image_bytes("PNG", (640, 360)))
+        await s.flush_thumbnails()
+        first = await s.thumbnail(d, nid)
+        await s.set_thumbnail(d, nid, image_bytes("PNG", (360, 640)))   # regenerated
+        self.assertEqual(self.blob_count(), files)                     # the old pack is gone
+        self.assertIsNone(s.conn.execute("SELECT 1 FROM thumbs").fetchone())
+        await s.flush_thumbnails()
+        second = await s.thumbnail(d, nid)
+        self.assertNotEqual(first, second)
+        os.remove(Path(self.thumb_dir, f"{nid}.thumb"))
+        self.assertEqual(await s.thumbnail(d, nid), second)            # from Telegram
+
+        await s.remove_thumbnail(d, nid)
+        self.assertEqual((self.blob_count(), os.listdir(self.thumb_dir)), (files, []))
+        self.assertFalse(s.stat(d, nid).thumb)
+        self.assertIsNone(await s.thumbnail(d, nid))
+
+    async def test_unsent_thumbnails_are_sent_after_a_restart(self):
+        s, d = self.store, self.drive
+        nid = await s.upload(d, None, "clip.mp4", gen(os.urandom(100)))
+        await s.set_thumbnail(d, nid, image_bytes("PNG", (640, 360)))
+        s.conn.close()   # a crash before the pack went out
+        self.store = s = Storage(db.connect(self.db_path), LocalTransport(self.blobs),
+                                 chunk_size=CHUNK, thumb_dir=self.thumb_dir)
+        self.assertEqual(s.sweep_thumbnails(), 0)
+        self.assertEqual(s.resume_thumbnails(), 1)
+        await s.flush_thumbnails()
+        self.assertIsNotNone(s.conn.execute("SELECT 1 FROM thumbs WHERE node_id = ?", (nid,)).fetchone())
+        self.assertEqual(s.resume_thumbnails(), 0)
+
+    async def test_unsent_ones_are_not_evicted(self):
+        s, d = self.store, self.drive
+        ids = [await s.upload(d, None, f"c{i}.mp4", gen(os.urandom(100))) for i in range(3)]
+        s.thumb_cache_bytes = 1
+        for nid in ids:
+            await s.set_thumbnail(d, nid, image_bytes("PNG", (640, 360)))
+        self.assertEqual(len(os.listdir(self.thumb_dir)), 3)
+        await s.flush_thumbnails()
+        s._trim_thumbnails()
+        self.assertEqual(os.listdir(self.thumb_dir), [])
+        self.assertTrue(await s.thumbnail(d, ids[0]))
 
 
 class SearchTest(Base):

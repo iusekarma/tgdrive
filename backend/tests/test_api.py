@@ -322,6 +322,9 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(c.put(url, content=buf.getvalue()).status_code, 204)
         self.assertEqual(c.get(url).status_code, 200)
         self.assertEqual(c.put(url, content=b"x" * (4 * 1024 * 1024 + 1)).status_code, 413)
+        self.assertEqual(c.delete(url).status_code, 204)          # to make a new one
+        self.assertEqual(c.get(url).status_code, 404)
+        self.assertFalse(c.get("/api/drives/main/nodes").json()["entries"][1]["thumb"])
 
     def test_file_info(self):
         c = self.c

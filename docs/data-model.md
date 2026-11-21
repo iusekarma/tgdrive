@@ -50,10 +50,19 @@ erDiagram
         TEXT file_id "per-bot download handle"
         INTEGER size "plaintext bytes"
     }
+    thumbs {
+        TEXT node_id PK,FK
+        TEXT chat_id "channel"
+        INTEGER message_id "a pack of thumbnails"
+        TEXT file_id "per-bot download handle"
+        INTEGER pack_offset "where in the message"
+        INTEGER pack_length
+    }
     drives ||--o{ nodes : "ON DELETE CASCADE"
     drives ||--o| webdav : "ON DELETE CASCADE"
     nodes ||--o{ nodes : "parent_id, CASCADE"
     nodes ||--o{ chunks : "ON DELETE CASCADE"
+    nodes ||--o| thumbs : "ON DELETE CASCADE"
 ```
 
 `vault` holds one row. Drives are not linked to it by a foreign key; the link
@@ -108,6 +117,12 @@ the message, and several rows have the same `message_id`; the index
 upload a small file is `ready` with no `chunks` row at all: its chunk waits
 in `<database folder>/pending/<node id>.chunk` until its pack is sent.
 
+`thumbs` says where a file's thumbnail is in Telegram: always in a pack of
+thumbnails (see
+[backend.md](backend.md#thumbnail-packs)), at `pack_offset`, sealed with
+the file's key exactly as in the cache. A file whose thumbnail is cached
+but has no row has one waiting to be sent (for up to a minute).
+
 ## Node lifecycle
 
 ```mermaid
@@ -145,6 +160,7 @@ Two ordering rules keep the database and the channel consistent:
 | Resumable upload progress (`UploadState`) | `Storage._uploads` | The `uploading` node is purged; the browser starts that file again |
 | Wrong-password counters | `LoginThrottle._fails` | Counters reset |
 | "Thumbnail could not be made" set | `Storage._thumb_failed` | One more attempt per image |
+| Thumbnails waiting for their pack | `Storage._thumb_queue` | Nothing: `resume_thumbnails()` finds them in the cache again |
 
 ## On disk, outside the database
 
@@ -152,4 +168,5 @@ The thumbnail cache, `TGDRIVE_CACHE_DIR/thumbs/<node id>.thumb`: each file is
 the WebP thumbnail sealed with the file's key. File modification time is
 used as "last shown" (updated on every read), and when the total passes
 `TGDRIVE_THUMB_CACHE_MB` the least recently shown are deleted down to 90% of
-the limit. The cache is disposable: images get theirs rebuilt on demand.
+the limit, except those not sent to Telegram yet. Otherwise the cache is
+disposable: a miss fetches the thumbnail's pack from Telegram.

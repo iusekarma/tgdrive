@@ -15,7 +15,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { type Entry } from "../api";
 import { useFileInfo } from "../fileinfo";
 import { formatDateTime, formatLength, formatSize, previewKind, typeName, type PreviewKind } from "../format";
-import { cachedThumbnail, hasThumbnail, loadThumbnail } from "../thumbs";
+import { cachedThumbnail, hasThumbnail, loadThumbnail, useThumbnailVersion } from "../thumbs";
 import { Dialog, ICON_BUTTON } from "./ui";
 
 const KIND_ICONS: Record<PreviewKind, LucideIcon> = {
@@ -40,6 +40,7 @@ export function KindIcon({ entry, size, className = "" }: { entry: Entry; size: 
 function Picture({ drive, entry }: { drive: string; entry: Entry }) {
   const wanted = hasThumbnail(entry);
   const [url, setUrl] = useState(() => (wanted ? cachedThumbnail(drive, entry.id) : null));
+  const version = useThumbnailVersion(drive, entry.id);
   useEffect(() => {
     if (!wanted) return setUrl(null);
     let live = true;
@@ -47,7 +48,7 @@ function Picture({ drive, entry }: { drive: string; entry: Entry }) {
     return () => {
       live = false;
     };
-  }, [drive, entry.id, entry.thumb, wanted]);
+  }, [drive, entry.id, entry.thumb, wanted, version]);
   return (
     <div className="flex aspect-video w-full items-center justify-center overflow-hidden rounded-lg bg-ink/[0.04]">
       {url ? <img src={url} alt="" className="h-full w-full object-contain" /> : <KindIcon entry={entry} size={44} />}

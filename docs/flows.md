@@ -251,16 +251,25 @@ flowchart TD
     end
     subgraph SV["Made on the server (fallback for images)"]
         G1["GET /files/{id}/thumbnail"] --> G2{"cached?"}
-        G2 -- no --> G3{"image ext,<br/>≤ 50 MB,<br/>not failed before?"}
+        G3{"image ext,<br/>≤ 50 MB,<br/>not failed before?"}
         G3 -- no --> G404["404 → UI shows an icon"]
         G3 -- yes --> G4["download & decrypt the file"]
     end
     U3 --> M
     G4 --> M["thumbs.make():<br/>re-encode to 320px WebP"]
     M --> E["seal with the file key"] --> W["write /cache/thumbs/&lt;id&gt;.thumb<br/>trim cache if over limit"]
+    G2 -- no --> TG{"in a pack<br/>in Telegram?"}
+    TG -- yes --> P["fetch the pack once,<br/>refill the cache with all of it"] --> D
+    TG -- no --> G3
     G2 -- yes --> D["decrypt, update mtime"] --> OUT["200 image/webp, no-store"]
     W --> OUT
+    W --> Q["queue it; a pack of thumbnails<br/>goes to Telegram 60 s later"]
 ```
+
+The viewer makes one for a file opened without one: from the image it
+shows, or from a frame read by a hidden second player for a video.
+**Regenerate thumbnail** sends `DELETE /files/{id}/thumbnail` and then
+makes one the same way, falling back to the server for images.
 
 ## Backup
 

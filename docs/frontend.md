@@ -192,11 +192,20 @@ has one, or it is an image of 50 MB or less (which the server can make on
 demand).
 
 **Making.** After an upload, `sendDetails()` draws an image, or a video
-frame about 10% in (at most 30 s), onto a canvas scaled to 320 px and
-`PUT`s it as WebP (PNG where WebP encoding is unsupported). The server
-re-encodes whatever it receives. This means Telegram is never asked for a
-file just to thumbnail it. `sendFrame()` does the same from a video being
-watched, for videos uploaded before thumbnails existed.
+frame at `frameTime()` (a tenth of the way in, at least 3 s and at most
+3 min, never past halfway), onto a canvas scaled to 320 px and `PUT`s it
+as WebP (PNG where WebP encoding is unsupported). The server re-encodes
+whatever it receives. This means Telegram is never asked for a file just to
+thumbnail it.
+
+A file opened in the viewer without one gets one: `sendPicture()` from the
+image shown, `sendVideoFrame()` from a hidden second player seeking to
+`frameTime()` (so it doesn't matter where the user is watching), or, for
+MPEG-TS, `sendFrame()` from the player once it gets there.
+`regenerateThumbnail()` (**Regenerate thumbnail** in a file's menu) deletes
+it on the server and makes a new one from the file read back, leaving
+images the browser can't decode to the server. `useThumbnailVersion()`
+lets anything showing the old one load the new one.
 
 The same decode yields the file's details (dimensions, length, EXIF date
 and camera, last-modified time), sent with one `PUT /files/{id}/info`.

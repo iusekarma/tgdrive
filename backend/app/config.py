@@ -26,6 +26,7 @@ class Config:
     pack_small_files: bool = True       # small files share Telegram messages; see Storage
     pack_max_file_mb: float = 4.0       # what counts as small (at most the chunk size)
     pack_wait: float = 5.0              # seconds a pack that isn't full waits for more
+    thumb_pack_wait: float = 60.0       # the same for thumbnails, which are in no hurry
 
     @property
     def pack_dir(self) -> str:
@@ -59,6 +60,7 @@ class Config:
             pack_small_files=os.environ.get("TGDRIVE_PACK_SMALL_FILES", "true").lower() in ("1", "true", "yes"),
             pack_max_file_mb=float(os.environ.get("TGDRIVE_PACK_MAX_FILE_MB", "4")),
             pack_wait=float(os.environ.get("TGDRIVE_PACK_WAIT_SECONDS", "5")),
+            thumb_pack_wait=float(os.environ.get("TGDRIVE_THUMB_PACK_WAIT_SECONDS", "60")),
         )
 
     def make_transport(self):

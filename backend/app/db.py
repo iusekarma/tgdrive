@@ -1,4 +1,5 @@
-"""SQLite metadata store: the vault, drives, the folder tree, and the chunk map."""
+"""SQLite metadata store: the vault, drives, the folder tree, the chunk map,
+and where thumbnails are in Telegram."""
 from __future__ import annotations
 
 import gzip
@@ -70,6 +71,20 @@ CREATE TABLE IF NOT EXISTS chunks (
     PRIMARY KEY (node_id, idx)
 );
 CREATE INDEX IF NOT EXISTS chunks_by_message ON chunks(chat_id, message_id);
+
+-- Thumbnails kept in Telegram, always in a pack of thumbnails (never with
+-- file chunks). The bytes at pack_offset are the thumbnail sealed with its
+-- file's key, exactly as in the local thumbnail cache. A file with a cached
+-- thumbnail but no row here has one waiting to be sent.
+CREATE TABLE IF NOT EXISTS thumbs (
+    node_id     TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
+    chat_id     TEXT NOT NULL,
+    message_id  INTEGER NOT NULL,
+    file_id     TEXT NOT NULL,
+    pack_offset INTEGER NOT NULL,
+    pack_length INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS thumbs_by_message ON thumbs(chat_id, message_id);
 """
 
 #: Files whose only chunk is still on local disk, waiting for its pack.

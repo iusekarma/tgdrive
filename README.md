@@ -245,7 +245,7 @@ backup to the channel.
 | `TGDRIVE_BACKUP_PASSPHRASE` (if set) | `backend/.env` | Needed to restore the database from the channel |
 | `TG_BOT_TOKEN` | `backend/.env` | Create a new bot and add it to the channel; files are still readable |
 | Database | `backend/data/`, plus a backup pinned in the channel | Rebuilt automatically from the channel backup |
-| Thumbnail cache | `tgdrive-cache` Docker volume | Nothing; thumbnails are rebuilt |
+| Thumbnail cache | `tgdrive-cache` Docker volume | Nothing; thumbnails come back from the channel (any made in the last minute or so are made again when the file is opened) |
 
 ### Moving to a new server
 
@@ -333,13 +333,14 @@ All settings go in `backend/.env` (see [backend/.env.example](backend/.env.examp
 | `TGDRIVE_ADMIN_PASSWORD` | unset | If set, required for first-time setup in the web UI |
 | `TGDRIVE_COOKIE_SECURE` | `false` | Set to `true` when serving over HTTPS |
 | `TGDRIVE_SESSION_IDLE_MINUTES` | `30` | Idle time before a session's drives lock |
-| `TGDRIVE_THUMB_CACHE_MB` | `512` | Size limit of the thumbnail cache; `0` for no limit |
+| `TGDRIVE_THUMB_CACHE_MB` | `512` | Size limit of the local thumbnail cache; `0` for no limit. Thumbnails are also kept in the channel, so evicted ones come back |
 | `TGDRIVE_CHUNK_CACHE_MB` | `64` | Recently read chunks kept in memory, still encrypted, so many small range reads of one chunk fetch it from Telegram once; `0` turns it off |
 | `TGDRIVE_BACKUP_DEBOUNCE_SECONDS` | `30` | Delay between a change and its backup |
 | `TGDRIVE_CHUNK_SIZE` | `16777216` | Chunk size in bytes (16 MB) |
 | `TGDRIVE_PACK_SMALL_FILES` | `true` | Small files share Telegram messages, so many of them upload far faster under Telegram's limit of about 20 messages a minute. `false` sends one message per file |
 | `TGDRIVE_PACK_MAX_FILE_MB` | `4` | Files up to this size are packed (at most the chunk size) |
 | `TGDRIVE_PACK_WAIT_SECONDS` | `5` | How long a pack that isn't full waits for more files before it is sent |
+| `TGDRIVE_THUMB_PACK_WAIT_SECONDS` | `60` | The same for thumbnails, which go to the channel in packs of their own |
 | `TGDRIVE_TRANSPORT` | `telegram` | `local` stores chunks on disk instead, for trying tgdrive without Telegram |
 | `TGDRIVE_LOCAL_DIR` | `./data/blobs` | Where chunks go with `TGDRIVE_TRANSPORT=local` |
 | `TGDRIVE_DB` | `./data/tgdrive.db` | Database path (fixed to `/data` in Docker) |
@@ -390,10 +391,13 @@ upload is discarded after an hour without progress, or when the server
 restarts.
 
 **Thumbnails.** Your browser makes thumbnails of images and videos right
-after uploading them. Images uploaded other ways get one made on the server
-when first shown (up to 50 MB). Thumbnails are encrypted and cached on the
-server, not in Telegram, to stay within Telegram's rate limits; lost ones are
-rebuilt.
+after uploading them; a video's is a frame a tenth of the way in (at least
+3 seconds, at most 3 minutes). A file opened in the viewer without one gets
+one then, and images uploaded other ways get one made on the server when
+first shown (up to 50 MB). **Regenerate thumbnail** in a file's menu makes a
+new one. Thumbnails are encrypted with their file's key and kept in the
+channel, a few hundred to a message so they cost almost nothing against
+Telegram's rate limits, and cached on the server.
 
 **Search.** The search box (shortcut `/`) matches file and folder names
 across the whole drive; every word you type must appear in the name. Names
@@ -439,7 +443,7 @@ Interactive docs are served at **http://localhost:8000/api/docs**.
 | GET | `/api/drives/{name}/files/{id}` | Download; supports `Range` and `?inline=true`, and `offset`, `length`, `filename` to serve part of the file as a file of its own |
 | POST | `/api/drives/{name}/zips` | Start a zip of `ids` (folders included); answers with the `url` to fetch it from |
 | GET | `/api/drives/{name}/zips/{id}` | The zip, streamed as it is built (stored, not compressed; length known up front) |
-| GET · PUT | `/api/drives/{name}/files/{id}/thumbnail` | Get or upload a 320px WebP thumbnail |
+| GET · PUT · DELETE | `/api/drives/{name}/files/{id}/thumbnail` | Get, upload, or forget (to make a new one) a 320px WebP thumbnail |
 | GET · PUT | `/api/drives/{name}/files/{id}/info` | Get or merge a file's details (dimensions, length, dates, camera) |
 
 Drive routes answer 401 with `"locked": "vault"` or `"locked": "drive"` to

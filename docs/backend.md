@@ -253,8 +253,8 @@ dropped from it in `discard()`.
 `delete_nodes()` and `detach_drive()` call `_detach()`, which in one
 transaction walks each subtree with a recursive CTE, collects its chunk
 references, and deletes the top rows (children go by `ON DELETE CASCADE`).
-A pack's message is only returned once no chunk refers to it any more, so it
-goes with the last file in it. Then thumbnails and waiting chunks are
+A pack's message is only returned once no chunk or thumbnail refers to it
+any more, so it goes with the last file in it. Then thumbnails and waiting chunks are
 removed and any in-flight upload under it is marked `gone`. The references are returned so the caller can delete the Telegram
 messages; `discard()` does so with `delete_many()` and logs, never raises,
 on failure.
@@ -263,9 +263,11 @@ on failure.
 
 | Method | Does |
 |---|---|
-| `set_thumbnail(drive, id, image)` | Re-encodes any image to a 320px WebP (`thumbs.make`, in a thread), seals it with the file key, writes it atomically, then trims the cache |
-| `thumbnail(drive, id)` | Returns the decrypted WebP. If there is none and the file is an image of a known type up to 50 MB, downloads it once and makes one. A per-node lock stops two requests making the same thumbnail; failures are remembered in `_thumb_failed` |
+| `set_thumbnail(drive, id, image)` | Re-encodes any image to a 320px WebP (`thumbs.make`, in a thread), seals it with the file key, writes it to the cache atomically and queues it to be sent. A thumbnail it replaces loses its `thumbs` row, and its pack's message goes if nothing else is in it |
+| `remove_thumbnail(drive, id)` | Forgets it in the cache, the queue and `thumbs`, and clears `_thumb_failed`, so a new one can be made (`DELETE /files/{id}/thumbnail`) |
+| `thumbnail(drive, id)` | Returns the decrypted WebP: from the cache, else from its pack in Telegram (`_thumb_from_pack`), else, for an image of a known type up to 50 MB, made by downloading the file once. A per-node lock stops two requests making the same thumbnail; failures are remembered in `_thumb_failed` |
 | `sweep_thumbnails()` | At startup: deletes thumbnails whose node no longer exists (after a restore) and leftover `.tmp` files |
+| `resume_thumbnails()` | At startup, after the sweep: queues cached thumbnails with no `thumbs` row, most recently shown first. Thumbnails cached before they were kept in Telegram go this way |
 
 ### File details
 
@@ -279,9 +281,32 @@ them from the local copy after an upload and from previews they are already
 showing (`PUT /files/{id}/info`); `thumbnail()`, which has the whole image
 in hand anyway, adds an image's own with `thumbs.describe`.
 
-Thumbnails are kept on local disk rather than in Telegram because one extra
-channel message per file would halve upload speed under Telegram's per-chat
-rate limit.
+#### Thumbnail packs
+
+A message per thumbnail would halve upload speed under Telegram's limit of
+about 20 messages a minute, so thumbnails go out in packs of their own, of
+up to `THUMB_PACK_BYTES` (4 MiB, a few hundred thumbnails), never mixed with
+file chunks:
+
+- The cache file is the thumbnail's copy until it is sent, so
+  `_trim_thumbnails()` never evicts one still in `_thumb_queue`.
+- `_thumb_timer_loop()` sends a pack `TGDRIVE_THUMB_PACK_WAIT_SECONDS` (60)
+  after it was started. A backlog of full ones goes out `THUMB_BACKLOG_GAP`
+  (10 s) apart, leaving most of the limit to uploads; after a failure it
+  waits a minute. Thumbnails never wait on Telegram in a request.
+- `_send_thumbs()` records a `thumbs` row for each one only if it was not
+  deleted or replaced while the pack was sent (each queue entry has a
+  generation for that).
+- A miss in the cache (`_thumb_from_pack()`) fetches the whole pack once,
+  however many requests want it, and writes every thumbnail in it back to
+  the cache, since they mostly belong to the folder being shown. The bytes
+  are the sealed thumbnails, so this needs no keys. Telegram failing here is
+  a 503, not a 404, so the browser asks again later.
+- `stop_packing()` sends the queue on shutdown. `backup()` doesn't wait for
+  it: a thumbnail not sent yet is simply not in the snapshot.
+- A pack's message is deleted with the last thumbnail in it: `_detach()`
+  and `_forget_thumb_row()` check both `chunks` and `thumbs`
+  (`_message_unused()`).
 
 ### Backup and restore
 

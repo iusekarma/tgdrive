@@ -44,10 +44,10 @@ There are three places data lives:
 
 | Where | What | Encrypted? |
 |---|---|---|
-| Telegram channel | One document message per file chunk (small files share one), plus one pinned database snapshot | Chunks always. The snapshot only if `TGDRIVE_BACKUP_PASSPHRASE` is set (its keys and names are encrypted either way) |
-| SQLite (`/data`) | Vault, drives, folder tree, chunk map | Names and keys yes; sizes, dates, drive names and tree shape no |
+| Telegram channel | One document message per file chunk (small files share one), packs of thumbnails, plus one pinned database snapshot | Chunks always. The snapshot only if `TGDRIVE_BACKUP_PASSPHRASE` is set (its keys and names are encrypted either way) |
+| SQLite (`/data`) | Vault, drives, folder tree, chunk map, where thumbnails are | Names and keys yes; sizes, dates, drive names and tree shape no |
 | `/data/pending` | Small files' chunks for a few seconds, until their pack is sent | Yes, as they will be in Telegram |
-| Thumbnail cache (`/cache`) | One 320px WebP per file | Yes, with the file's own key |
+| Thumbnail cache (`/cache`) | One 320px WebP per file; the only copy of new ones for up to a minute, until their pack is sent | Yes, with the file's own key |
 
 And one place keys live: the server's memory, inside a `Session`.
 
@@ -109,7 +109,8 @@ flowchart TD
     E -- yes --> OPEN["db.connect(): WAL mode,<br/>migrate, create tables"]
     OPEN --> CL["cleanup_incomplete():<br/>purge uploads cut off by the last stop"]
     CL --> SW["sweep_thumbnails():<br/>drop thumbs for deleted files, trim cache"]
-    SW --> BK["start BackupScheduler<br/>store.on_change = mark_dirty"]
+    SW --> RT["resume_thumbnails():<br/>queue cached thumbs not in Telegram"]
+    RT --> BK["start BackupScheduler<br/>store.on_change = mark_dirty"]
     BK --> EX["start upload-expiry loop<br/>(every 10 min, drop uploads idle > 1 h)"]
     EX --> RUN([serving requests])
     RUN --> STOP([SIGTERM])

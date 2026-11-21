@@ -17,6 +17,8 @@ from . import crypto, db, thumbs
 from .transport import BlobRef, Transport, Wait, on_wait
 
 CHUNK_SIZE = 16 * 1024 * 1024  # plaintext bytes per Telegram message
+THUMB_PACK_BYTES = 4 * 1024 * 1024   # a pack of thumbnails: a few hundred, cheap to fetch whole
+THUMB_BACKLOG_GAP = 10.0       # seconds between full thumbnail packs, leaving Telegram's limit to uploads
 
 log = logging.getLogger("tgdrive.storage")
 
@@ -163,10 +165,14 @@ class Storage:
     """All database access happens on the event loop thread. Only pure crypto
     is pushed to worker threads, so the SQLite connection is never shared.
 
-    Thumbnails are a cache: kept encrypted in thumb_dir on local disk, not in
-    Telegram (one extra channel message per file would halve upload speed
-    under Telegram's per-chat rate limit). Past thumb_cache_bytes the least
-    recently shown are evicted; images get theirs back on demand.
+    Thumbnails are kept in Telegram, in packs of their own of up to
+    THUMB_PACK_BYTES, and cached encrypted in thumb_dir on local disk, which
+    is where they are read from. A new one goes in the cache at once and
+    waits there for its pack: sent thumb_pack_wait seconds after the first
+    of them, so a few hundred cost one message. Past thumb_cache_bytes the
+    least recently shown are evicted, never one still waiting; a miss
+    fetches its pack and puts every thumbnail in it back in the cache.
+    Images with no thumbnail at all get one made on demand.
 
     Recently read chunks are kept in memory, still encrypted, up to
     blob_cache_bytes (0 turns this off). Readers that ask for many small
@@ -186,7 +192,7 @@ class Storage:
                  chunk_size: int = CHUNK_SIZE, backup_passphrase: str | None = None,
                  thumb_dir: str | None = None, thumb_cache_bytes: int | None = None,
                  blob_cache_bytes: int = 0, pack_dir: str | None = None,
-                 pack_max_file: int = 0, pack_wait: float = 5.0):
+                 pack_max_file: int = 0, pack_wait: float = 5.0, thumb_pack_wait: float = 60.0):
         if chunk_size + crypto.CHUNK_OVERHEAD > transport.max_blob_size:
             raise ValueError("chunk_size too large for this transport")
         self.conn = conn
@@ -222,6 +228,16 @@ class Storage:
         self._waiting: dict[str, _Waiting] = {}   # those, and any being sent right now
         self._pack_lock = asyncio.Lock()
         self._pack_timer: asyncio.Task | None = None
+        self.thumb_pack_wait = thumb_pack_wait
+        self._thumb_pack_limit = min(THUMB_PACK_BYTES, transport.max_blob_size)
+        #: Cached thumbnails not in Telegram yet, oldest first: node id -> (generation, bytes).
+        #: The generation changes when a thumbnail is replaced, so a pack sent
+        #: meanwhile doesn't claim the new one.
+        self._thumb_queue: dict[str, tuple[int, int]] = {}
+        self._thumb_generation = 0
+        self._thumb_send_lock = asyncio.Lock()
+        self._thumb_timer: asyncio.Task | None = None
+        self._thumb_pack_fetches: dict[tuple[str, int], asyncio.Lock] = {}
 
     async def _kdf(self, fn, *args):
         async with self._kdf_gate:
@@ -749,16 +765,23 @@ class Storage:
 
     async def stop_packing(self) -> None:
         """Before shutting down: sends what is waiting. Anything that can't be
-        sent stays in pack_dir for resume_packs."""
-        if self._pack_timer is not None:
-            self._pack_timer.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._pack_timer
+        sent stays in pack_dir (or the thumbnail cache) for resume_packs
+        (or resume_thumbnails)."""
+        for timer in (self._pack_timer, self._thumb_timer):
+            if timer is not None:
+                timer.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await timer
         try:
             await self.flush_packs()
         except Exception:
             log.warning("%d small file(s) not sent yet; they go at the next start",
                         len(self._pack), exc_info=True)
+        try:
+            await self.flush_thumbnails()
+        except Exception:
+            log.warning("%d thumbnail(s) not sent yet; they go at the next start",
+                        len(self._thumb_queue), exc_info=True)
 
     async def resume_packs(self) -> int:
         """After a restart, queues the files still waiting in pack_dir. Run
@@ -1032,6 +1055,9 @@ class Storage:
                     )
                     SELECT sub.id AS node_id, c.chat_id, c.message_id, c.file_id
                     FROM sub LEFT JOIN chunks c ON c.node_id = sub.id
+                    UNION ALL
+                    SELECT t.node_id, t.chat_id, t.message_id, t.file_id
+                    FROM sub JOIN thumbs t ON t.node_id = sub.id
                     """,
                     (node_id,),
                 ).fetchall()
@@ -1041,9 +1067,8 @@ class Storage:
                         refs.setdefault((r["chat_id"], r["message_id"]),
                                         BlobRef(r["chat_id"], r["message_id"], r["file_id"]))
                 self.conn.execute("DELETE FROM nodes WHERE id = ?", (node_id,))
-            # A pack goes with the last file in it.
-            kept = [key for key in refs if self.conn.execute(
-                "SELECT 1 FROM chunks WHERE chat_id = ? AND message_id = ? LIMIT 1", key).fetchone()]
+            # A pack goes with the last file (or thumbnail) in it.
+            kept = [key for key in refs if not self._message_unused(key)]
         for key in kept:
             del refs[key]
         for node_id in gone:
@@ -1053,6 +1078,13 @@ class Storage:
             if state is not None:
                 state.gone = True
         return list(refs.values())
+
+    def _message_unused(self, key: tuple[str, int]) -> bool:
+        """Whether no chunk or thumbnail is in this message any more."""
+        return not self.conn.execute(
+            "SELECT 1 FROM chunks WHERE chat_id = ? AND message_id = ? "
+            "UNION ALL SELECT 1 FROM thumbs WHERE chat_id = ? AND message_id = ? LIMIT 1",
+            key + key).fetchone()
 
     async def discard(self, refs: list[BlobRef]) -> None:
         """Best effort: an orphaned blob is unreadable noise, so failures are
@@ -1075,9 +1107,14 @@ class Storage:
 
     def has_thumbnail(self, node_id: str) -> bool:
         path = self._thumb_path(node_id)
-        return path is not None and os.path.exists(path)
+        if path is None:
+            return False
+        return os.path.exists(path) or self.conn.execute(
+            "SELECT 1 FROM thumbs WHERE node_id = ?", (node_id,)).fetchone() is not None
 
     def _remove_thumbnail(self, node_id: str) -> None:
+        """From the cache and the send queue; the row is the caller's."""
+        self._thumb_queue.pop(node_id, None)
         path = self._thumb_path(node_id)
         if path:
             self._unlink_thumb(path)
@@ -1102,9 +1139,18 @@ class Storage:
                 found.append((f.path, st.st_size, st.st_mtime))
         return found
 
+    def _write_thumb(self, path: str, blob: bytes) -> None:
+        tmp = f"{path}.{uuid.uuid4().hex}.tmp"
+        with open(tmp, "wb") as f:
+            f.write(blob)
+        old = os.path.getsize(path) if os.path.exists(path) else 0
+        os.replace(tmp, path)
+        self._thumb_total += len(blob) - old
+
     def _trim_thumbnails(self) -> None:
         """Evict the least recently shown down to 90% of the limit, so the
-        directory isn't rescanned on every new thumbnail."""
+        directory isn't rescanned on every new thumbnail. Those not in
+        Telegram yet stay: the cache is their only copy."""
         limit = self.thumb_cache_bytes
         if not limit or self._thumb_total <= limit:
             return
@@ -1113,7 +1159,8 @@ class Storage:
         for path, _, _ in files:
             if self._thumb_total <= limit * 0.9:
                 break
-            self._unlink_thumb(path)
+            if os.path.basename(path).split(".", 1)[0] not in self._thumb_queue:
+                self._unlink_thumb(path)
 
     def _file_key(self, drive: Drive, node_id: str) -> bytes:
         node = self._node(drive, node_id)
@@ -1123,30 +1170,57 @@ class Storage:
 
     async def set_thumbnail(self, drive: Drive, node_id: str, image: bytes) -> None:
         """Re-encodes any image into the one thumbnail size and stores it,
-        encrypted with the file's own key. Raises thumbs.BadImage."""
+        encrypted with the file's own key, replacing any it had. Raises
+        thumbs.BadImage."""
         path = self._thumb_path(node_id)
         if path is None:
             raise StorageError("thumbnails are turned off")
         file_key = self._file_key(drive, node_id)
         webp = await asyncio.to_thread(thumbs.make, image)
         blob = crypto.encrypt_thumbnail(file_key, node_id, webp)
-        tmp = f"{path}.{uuid.uuid4().hex}.tmp"
-        with open(tmp, "wb") as f:
-            f.write(blob)
-        old = os.path.getsize(path) if os.path.exists(path) else 0
-        os.replace(tmp, path)
-        self._thumb_total += len(blob) - old
+        self._write_thumb(path, blob)
         self._thumb_failed.discard(node_id)
+        old = self._forget_thumb_row(node_id)
+        self._queue_thumb(node_id, len(blob))
         self._trim_thumbnails()
+        if old:
+            await self.discard([old])
+
+    async def remove_thumbnail(self, drive: Drive, node_id: str) -> None:
+        """Forgets the file's thumbnail everywhere, so one can be made afresh
+        (an image's is made again on its next request)."""
+        self._file_key(drive, node_id)
+        self._remove_thumbnail(node_id)
+        self._thumb_failed.discard(node_id)
+        old = self._forget_thumb_row(node_id)
+        if old:
+            await self.discard([old])
+
+    def _forget_thumb_row(self, node_id: str) -> BlobRef | None:
+        """Deletes where the file's thumbnail was in Telegram. Returns that
+        message if nothing else is in it any more, for the caller to discard."""
+        row = self.conn.execute(
+            "SELECT chat_id, message_id, file_id FROM thumbs WHERE node_id = ?", (node_id,)).fetchone()
+        if row is None:
+            return None
+        with self.conn:
+            self.conn.execute("DELETE FROM thumbs WHERE node_id = ?", (node_id,))
+        self.on_change()
+        if not self._message_unused((row["chat_id"], row["message_id"])):
+            return None
+        return BlobRef(row["chat_id"], row["message_id"], row["file_id"])
 
     async def thumbnail(self, drive: Drive, node_id: str) -> bytes | None:
         """The stored thumbnail. For small images that have none yet, one is
-        made from the file on first request; otherwise None."""
+        made from the file on first request; otherwise None. Raises
+        TransportUnavailable when it is only in Telegram and Telegram fails."""
         path = self._thumb_path(node_id)
         if path is None:
             return None
         file_key = self._file_key(drive, node_id)
         blob = self._read_thumbnail(path)
+        if blob is None:
+            blob = await self._thumb_from_pack(node_id)
         if blob is None:
             entry = self.stat(drive, node_id)
             if node_id in self._thumb_failed or not thumbs.can_generate(entry.name, entry.size):
@@ -1174,6 +1248,41 @@ class Storage:
                 return None
         return crypto.decrypt_thumbnail(file_key, node_id, blob)
 
+    async def _thumb_from_pack(self, node_id: str) -> bytes | None:
+        """A thumbnail missing from the cache, fetched with its whole pack;
+        the others in the pack go back in the cache too, as the folder being
+        shown usually holds them. Requests for the same pack share a fetch."""
+        row = self.conn.execute("SELECT * FROM thumbs WHERE node_id = ?", (node_id,)).fetchone()
+        if row is None:
+            return None
+        key = (row["chat_id"], row["message_id"])
+        lock = self._thumb_pack_fetches.setdefault(key, asyncio.Lock())
+        try:
+            async with lock:
+                blob = self._read_thumbnail(self._thumb_path(node_id))
+                if blob is not None:
+                    return blob   # the fetch we waited for brought it
+                try:
+                    pack = await self.transport.get(BlobRef(row["chat_id"], row["message_id"], row["file_id"]))
+                except Exception as e:
+                    log.warning("could not fetch thumbnails from %s/%s", *key, exc_info=True)
+                    raise TransportUnavailable(f"could not fetch the thumbnail from Telegram: {e}") from e
+                # Read again: rows may have gone while the pack was fetched.
+                for r in self.conn.execute(
+                        "SELECT node_id, pack_offset, pack_length FROM thumbs WHERE chat_id = ? AND message_id = ?",
+                        key).fetchall():
+                    part = pack[r["pack_offset"]:r["pack_offset"] + r["pack_length"]]
+                    if r["node_id"] == node_id:
+                        blob = part
+                    path = self._thumb_path(r["node_id"])
+                    if len(part) == r["pack_length"] and not os.path.exists(path):
+                        self._write_thumb(path, part)
+                self._trim_thumbnails()
+                return blob
+        finally:
+            if not lock.locked():
+                self._thumb_pack_fetches.pop(key, None)
+
     @staticmethod
     def _read_thumbnail(path: str) -> bytes | None:
         try:
@@ -1198,6 +1307,91 @@ class Storage:
                 removed += 1
         self._trim_thumbnails()
         return removed
+
+    # --- thumbnail packs ----------------------------------------------------
+
+    def _queue_thumb(self, node_id: str, size: int) -> None:
+        self._thumb_queue.pop(node_id, None)   # a replaced one goes to the back
+        self._thumb_generation += 1
+        self._thumb_queue[node_id] = (self._thumb_generation, size)
+        if self._thumb_timer is None or self._thumb_timer.done():
+            self._thumb_timer = asyncio.create_task(self._thumb_timer_loop())
+
+    def resume_thumbnails(self) -> int:
+        """At start: queues the cached thumbnails not in Telegram, the most
+        recently shown first. Thumbnails made before they were kept in
+        Telegram are sent this way too. Run it after sweep_thumbnails."""
+        if not self.thumb_dir:
+            return 0
+        sent = {r["node_id"] for r in self.conn.execute("SELECT node_id FROM thumbs")}
+        found = 0
+        for path, size, _ in sorted(self._thumb_files(), key=lambda f: -f[2]):
+            name = os.path.basename(path)
+            node_id = name.removesuffix(".thumb")
+            if name.endswith(".thumb") and node_id not in sent and node_id not in self._thumb_queue:
+                self._queue_thumb(node_id, size)
+                found += 1
+        return found
+
+    async def _thumb_timer_loop(self) -> None:
+        """Sends a pack thumb_pack_wait seconds after it was started. A
+        backlog of full ones (thumbnails from before this existed) goes out
+        THUMB_BACKLOG_GAP apart, leaving most of Telegram's limit to uploads."""
+        failed = False
+        while self._thumb_queue:
+            full = sum(size for _, size in self._thumb_queue.values()) >= self._thumb_pack_limit
+            await asyncio.sleep(max(self.thumb_pack_wait, 60.0) if failed
+                                else min(THUMB_BACKLOG_GAP, self.thumb_pack_wait) if full
+                                else self.thumb_pack_wait)
+            try:
+                await self._send_thumbs()
+                failed = False
+            except Exception:
+                log.warning("could not send %d thumbnail(s); will retry", len(self._thumb_queue), exc_info=True)
+                failed = True
+
+    async def _send_thumbs(self) -> None:
+        """Sends the oldest waiting thumbnails that fit in one pack. When the
+        transport gives up, they keep waiting and this raises."""
+        async with self._thumb_send_lock:
+            items: list[tuple[str, int, int, int]] = []   # node id, generation, offset, length
+            blobs: list[bytes] = []
+            total = 0
+            for node_id, (generation, _) in list(self._thumb_queue.items()):
+                try:
+                    with open(self._thumb_path(node_id), "rb") as f:
+                        blob = f.read()
+                except FileNotFoundError:
+                    self._thumb_queue.pop(node_id, None)
+                    continue
+                if items and total + len(blob) > self._thumb_pack_limit:
+                    break
+                items.append((node_id, generation, total, len(blob)))
+                blobs.append(blob)
+                total += len(blob)
+            if not items:
+                return
+            ref = await self.transport.put(b"".join(blobs))
+            # Not deleted or replaced while it was sent.
+            rows = [(n, ref.chat_id, ref.message_id, ref.file_id, offset, length)
+                    for n, generation, offset, length in items
+                    if self._thumb_queue.get(n, (None,))[0] == generation]
+            if not rows:
+                await self.discard([ref])
+                return
+            with self.conn:
+                self.conn.executemany(
+                    "INSERT INTO thumbs (node_id, chat_id, message_id, file_id, pack_offset, pack_length) "
+                    "VALUES (?, ?, ?, ?, ?, ?)", rows)
+            for r in rows:
+                del self._thumb_queue[r[0]]
+            self.on_change()
+
+    async def flush_thumbnails(self) -> None:
+        """Sends every thumbnail waiting now. Raises when the transport gives up."""
+        due = set(self._thumb_queue)
+        while due & self._thumb_queue.keys():
+            await self._send_thumbs()
 
     # --- file details -------------------------------------------------------
 
