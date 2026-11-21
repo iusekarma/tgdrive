@@ -190,6 +190,28 @@ class BulkTest(Base):
         s.move_many(d, [a, a], dest)
         self.assertEqual(sorted(e.name for e in s.list(d, dest)), ["a", "b"])
 
+    async def test_rename_many_is_all_or_nothing_and_allows_swaps(self):
+        s, d = self.store, self.drive
+        names = lambda parent=None: sorted(e.name for e in s.list(d, parent))
+        a = await s.upload(d, None, "a", gen(b"a"))
+        b = await s.upload(d, None, "b", gen(b"b"))
+        c = await s.upload(d, None, "c", gen(b"c"))
+        folder = s.mkdir(d, None, "f")
+        inner = await s.upload(d, folder, "a", gen(b"inner"))
+        s.rename_many(d, [(a, "b"), (b, "c"), (c, "a")])                    # a cycle
+        self.assertEqual([s.stat(d, n).name for n in (a, b, c)], ["b", "c", "a"])
+        s.rename_many(d, [(a, "x"), (inner, "x")])                          # same name, different folders
+        self.assertEqual((names(), names(folder)), (["a", "c", "f", "x"], ["x"]))
+        with self.assertRaises(Conflict):
+            s.rename_many(d, [(a, "y"), (b, "f")])                          # clashes with one left alone
+        with self.assertRaises(Conflict):
+            s.rename_many(d, [(a, "y"), (b, "y")])                          # clash with each other
+        with self.assertRaises(StorageError):
+            s.rename_many(d, [(a, "y"), (b, "no/slash")])
+        self.assertEqual(names(), ["a", "c", "f", "x"])                     # nothing changed
+        s.rename_many(d, [(a, "x"), (b, "c")])                              # unchanged names are fine
+        self.assertEqual(names(), ["a", "c", "f", "x"])
+
     async def test_delete_many_with_nested_selection(self):
         s, d = self.store, self.drive
         folder = s.mkdir(d, None, "f")

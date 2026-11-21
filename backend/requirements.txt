@@ -4,3 +4,4 @@ fastapi>=0.115
 uvicorn[standard]>=0.30
 python-dotenv>=1.0
 pillow>=11.0
+pillow-heif>=0.18

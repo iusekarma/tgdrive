@@ -187,6 +187,10 @@ leaving browser connections free for navigation. A 404 is remembered as
 "no thumbnail"; other failures are retried later. `forgetThumbnails(drive?)`
 revokes the URLs.
 
+HEIC/HEIF counts as an image (`isConvertedImage` in format.ts): the server
+makes its thumbnail, and the viewer shows `api.previewUrl`, a JPEG the
+server converts, instead of the file itself.
+
 `hasThumbnail(entry)` says whether asking can succeed: the server says it
 has one, or it is an image of 50 MB or less (which the server can make on
 demand).
@@ -265,12 +269,36 @@ The file browser for one drive and folder.
 
 - **Listing**: `["nodes", drive, parent]`, as a list or grid (remembered in
   `localStorage`), with thumbnails, breadcrumbs, and the `Sidebar`.
+- **Sorting** (`sorting.ts`, `components/SortMenu.tsx`): by name (natural
+  order, so `2` before `10`), type (extension), size or date added, either
+  way, folders first or mixed in; ties fall back to the name. Done in the
+  browser, so the viewer, keyboard moves and bulk-rename numbering follow the
+  order shown. Chosen from the menu beside the view toggle or by clicking a
+  list column (again to flip it); remembered for every folder in
+  `localStorage` (`tgdrive.sort`). Search results stay ranked by relevance
+  unless a sort is picked, which lasts until the search ends.
 - **Search**: the query lives in the URL (`?q=`), debounced by 250 ms, so
   Back returns to the results. Results replace the folder listing and show
   each match's folder path. `/` focuses the box.
 - **Selection**: click with Ctrl/Cmd to toggle, Shift for a range; once
   anything is selected, plain clicks select too. Ctrl/Cmd+A selects all,
-  Esc clears, Delete/Backspace deletes, F2 renames.
+  Esc clears, Delete/Backspace deletes, F2 renames (one item in
+  `NameDialog`, several in `BulkRenameDialog`). The selection toolbar also
+  has **All** and **Invert**.
+- **Keyboard**: a highlight (`cursor`, an entry id, outlined) is separate
+  from the selection. Arrows move it (Up/Down by a whole row in the grid,
+  counted from the grid's `grid-template-columns`), as do Home/End and
+  PageUp/PageDown; Shift extends the selection from the anchor. Enter opens
+  the highlighted item (`openEntry`: folder, preview or download), Space
+  selects it, Backspace or Alt+↑ goes up a folder, and typing letters jumps
+  to the next name starting with them (repeating one letter cycles). Delete
+  and F2 act on the highlighted item when nothing is selected. Back in a
+  parent folder, the folder just left is highlighted. Enter and Space are
+  left to a focused button or link.
+- **Bulk rename**: `BulkRenameDialog` gets each item with its folder, and
+  the names of the folder's other items (only known for the folder shown;
+  for search results the server checks). After renaming, a bar offers
+  **Undo**, which sends the old names back in one `renameMany`.
 - **Actions**: new folder, upload files, upload folder, rename, move (one or
   many), delete (one or many), download, preview, lock drive. A folder,
   or more than one item, downloads as a zip (`downloadZip`: `api.createZip`,
@@ -316,6 +344,40 @@ Clicking a locked drive goes to the drives page to unlock it.
 | `NameDialog` | New folder / rename |
 | `DeleteNodeDialog` | Confirms deleting one or many entries |
 | `MoveDialog` | Folder picker to move entries into |
+
+## components/BulkRenameDialog.tsx and rename.ts
+
+Renaming many items at once. `rename.ts` is pure: `plan(items, settings,
+others)` runs an ordered list of rules over each name and says, per item,
+the new name and what would stop it (empty, a slash, too long, two items
+landing on one name, or a name already taken in the folder). The dialog
+re-runs it on every change for the live preview (first 400 rows drawn,
+changed part marked), and sends only changed names, in one
+`api.renameMany`, which the server applies all or none.
+
+| Rule | Does |
+|---|---|
+| Find and replace | Plain text or regular expression (`$1`, `$<name>`, `$&`), match case, whole words, first or every match |
+| New name from pattern | The name from tokens; keeps the extension unless the pattern uses `{ext}` or `{full}` |
+| Insert text | At the start, the end, or a position from either end |
+| Remove characters | First N, last N, or N from a position |
+| Number | Start, step, padding (or fit the largest), 1/a/A/I styles, before, after or instead of the name |
+| Change case | Title, sentence, lower, upper, swap, camel, Pascal, snake, kebab |
+| Clean up | Trim, collapse spaces, `_`/`.` to spaces, drop bracketed text, strip accents, spaces to `_`/`-`/`.` |
+| Extension | Lower, upper, change or remove (the name only; nothing is converted) |
+
+Most rules can work on the name, the extension, or both. Text fields take
+tokens: `{name}`, `{ext}`, `{full}`, `{n:pad:start:step}`, `{count}`,
+`{parent}`, `{date}` / `{taken}` / `{modified}` / `{created}` (each with an
+optional format such as `{date:YYYY-MM-DD}`), `{width}`, `{height}`,
+`{duration}`, `{camera}`, `{size}`, and `|upper`, `|lower`, `|title`.
+Tokens needing file details fetch `["info", drive, id]` only when used.
+Numbering follows the list, name (natural order), date, upload date, size
+or type, optionally reversed and restarting in each folder.
+
+Rules can be turned off, reordered, duplicated and removed. The last rules
+used are remembered in `localStorage` (`tgdrive.bulkRename`), and named
+presets under `tgdrive.bulkRename.presets`.
 
 ## components/viewer.tsx
 

@@ -21,7 +21,7 @@ export function formatDate(seconds: number): string {
 export type PreviewKind = "image" | "video" | "audio" | "pdf" | "text" | "archive" | "comic";
 
 const KINDS: Record<PreviewKind, string[]> = {
-  image: ["png", "jpg", "jpeg", "gif", "webp", "avif", "bmp"],
+  image: ["png", "jpg", "jpeg", "gif", "webp", "avif", "bmp", "heic", "heif", "hif"],
   video: ["mp4", "webm", "mov", "m4v", "ogv", "mkv", "m2ts", "mts"],
   audio: ["mp3", "wav", "ogg", "m4a", "flac", "opus", "aac"],
   pdf: ["pdf"],
@@ -52,6 +52,9 @@ export function previewKind(name: string, size = 0): PreviewKind | null {
   }
   return null;
 }
+
+/** Images browsers can't show (HEIC): the server converts them to JPEG for viewing. */
+export const isConvertedImage = (name: string) => ["heic", "heif", "hif"].includes(extension(name));
 
 /** MPEG transport streams, which browsers can't play without help (mpegts.js). */
 export const isTransportStream = (name: string) => ["ts", "m2ts", "mts"].includes(extension(name));
@@ -85,7 +88,7 @@ export function formatDateTime(date: Date): string {
 }
 
 const TYPE_NAMES: Record<string, string> = {
-  jpg: "JPEG image", jpeg: "JPEG image", png: "PNG image", gif: "GIF image", webp: "WebP image",
+  jpg: "JPEG image", jpeg: "JPEG image", heif: "HEIF image", hif: "HEIF image", png: "PNG image", gif: "GIF image", webp: "WebP image",
   avif: "AVIF image", bmp: "BMP image", svg: "SVG image", heic: "HEIC image", tif: "TIFF image", tiff: "TIFF image",
   mp4: "MP4 video", m4v: "MP4 video", mov: "QuickTime video", webm: "WebM video", mkv: "Matroska video",
   avi: "AVI video", ogv: "Ogg video", m2ts: "MPEG-TS video", mts: "MPEG-TS video",

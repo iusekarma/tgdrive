@@ -8,13 +8,25 @@ from io import BytesIO
 
 from PIL import Image, ImageOps, UnidentifiedImageError
 
+try:   # HEIC/HEIF (iPhone photos). Optional: without it they are just files.
+    from pillow_heif import register_heif_opener
+except ImportError:   # pragma: no cover
+    HEIF = False
+else:
+    register_heif_opener()
+    HEIF = True
+
 SIZE = 320                          # longest side, in pixels
 MAX_PIXELS = 64_000_000             # refuse decompression bombs before decoding
 UPLOAD_MAX = 4 * 1024 * 1024        # largest thumbnail a browser may send
 SOURCE_MAX = 50 * 1024 * 1024       # largest image the server fetches to make one itself
+PREVIEW_SIDE = 4096                 # longest side of an image converted for viewing
 
-FORMATS = {"JPEG", "MPO", "PNG", "GIF", "WEBP", "BMP", "AVIF"}
+FORMATS = {"JPEG", "MPO", "PNG", "GIF", "WEBP", "BMP", "AVIF"} | ({"HEIF"} if HEIF else set())
 SOURCE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".avif"}
+# Images browsers can't show, which the server converts for viewing.
+CONVERTED_EXTENSIONS = {".heic", ".heif", ".hif"} if HEIF else set()
+SOURCE_EXTENSIONS |= CONVERTED_EXTENSIONS
 
 
 class BadImage(ValueError):
@@ -26,13 +38,42 @@ def can_generate(name: str, size: int) -> bool:
     return os.path.splitext(name)[1].lower() in SOURCE_EXTENSIONS and size <= SOURCE_MAX
 
 
+def needs_conversion(name: str) -> bool:
+    return os.path.splitext(name)[1].lower() in CONVERTED_EXTENSIONS
+
+
+def _open(data: bytes) -> Image.Image:
+    im = Image.open(BytesIO(data))
+    if im.format not in FORMATS:
+        im.close()
+        raise BadImage("unsupported image format")
+    if im.width * im.height > MAX_PIXELS:
+        im.close()
+        raise BadImage("image is too large")
+    return im
+
+
+def to_jpeg(data: bytes) -> bytes:
+    """The image as a JPEG a browser can show: upright, at most PREVIEW_SIDE
+    on its longest side, without metadata."""
+    try:
+        with _open(data) as im:
+            out = ImageOps.exif_transpose(im)
+            out.thumbnail((PREVIEW_SIDE, PREVIEW_SIDE))
+            if out.mode != "RGB":
+                out = out.convert("RGB")
+            buf = BytesIO()
+            out.save(buf, "JPEG", quality=88, optimize=True)
+            return buf.getvalue()
+    except BadImage:
+        raise
+    except (UnidentifiedImageError, Image.DecompressionBombError, OSError, ValueError, SyntaxError):
+        raise BadImage("not a readable image") from None
+
+
 def make(data: bytes) -> bytes:
     try:
-        with Image.open(BytesIO(data)) as im:
-            if im.format not in FORMATS:
-                raise BadImage("unsupported image format")
-            if im.width * im.height > MAX_PIXELS:
-                raise BadImage("image is too large")
+        with _open(data) as im:
             im.draft("RGB", (SIZE * 2, SIZE * 2))   # JPEG: decode at a reduced scale, much faster
             out = ImageOps.exif_transpose(im)
             out.thumbnail((SIZE, SIZE))

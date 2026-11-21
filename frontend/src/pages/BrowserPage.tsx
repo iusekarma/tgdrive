@@ -1,6 +1,8 @@
 import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  ArrowDown,
   ArrowLeft,
+  ArrowUp,
   BookOpen,
   ChevronRight,
   Download,
@@ -24,7 +26,7 @@ import {
   Upload,
   X,
 } from "lucide-react";
-import { useEffect, useRef, useState, type DragEvent, type MouseEvent, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type DragEvent, type MouseEvent, type ReactNode } from "react";
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
 
 import { api, ApiError, type Crumb, type DriveInfo, type Entry } from "../api";
@@ -37,11 +39,15 @@ import {
   type PasswordAction,
 } from "../components/driveDialogs";
 import { DetailsDialog, DetailsPanel, KindIcon } from "../components/details";
+import { BulkRenameDialog, type Renamed } from "../components/BulkRenameDialog";
 import { DeleteNodeDialog, MoveDialog, NameDialog } from "../components/fileDialogs";
 import Sidebar from "../components/Sidebar";
+import { SortMenu } from "../components/SortMenu";
 import { Viewer } from "../components/viewer";
 import { Button, ErrorNote, ICON_BUTTON, Menu, MenuItem, PageHeader, useSavedView, ViewToggle } from "../components/ui";
 import { pickedFromInput, readDropped, useUploads, type Picked } from "../components/uploads";
+import type { RenameItem } from "../rename";
+import { DEFAULT_SORT, sortByColumn, sortEntries, useSavedSort, type Sort, type SortKey } from "../sorting";
 import { driveUrl, formatDate, formatSize, previewKind } from "../format";
 import {
   cachedThumbnail,
@@ -56,6 +62,7 @@ import {
 type Open =
   | { type: "newFolder" }
   | { type: "rename"; entry: Entry }
+  | { type: "bulkRename"; items: RenameItem[]; others: Map<string | null, Set<string>> }
   | { type: "move"; entries: Entry[] }
   | { type: "delete"; entries: Entry[] }
   | { type: "preview"; entry: Entry }
@@ -223,11 +230,26 @@ export default function BrowserPage() {
 
   const [open, setOpen] = useState<Open>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  /** The last bulk rename, until something else happens, so it can be undone. */
+  const [undoable, setUndoable] = useState<Renamed[] | null>(null);
   const [dragging, setDragging] = useState(false);
   const [view, changeView] = useSavedView("tgdrive.view");
+  const [folderSort, setFolderSort] = useSavedSort();
+  /** Search results come ranked by relevance (null) unless a sort is picked; that choice lasts the search. */
+  const [searchSort, setSearchSort] = useState<Sort | null>(null);
   const [showDetails, setShowDetails] = useDetailsPanel();
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const anchor = useRef<number | null>(null);
+  /** The item the keyboard is on (highlighted, not necessarily selected). */
+  const [cursor, setCursor] = useState<string | null>(null);
+  /** Set when the cursor moves by keyboard, so the item scrolls into view. */
+  const reveal = useRef(false);
+  /** Type-ahead: letters typed in quick succession jump to a name starting with them. */
+  const typeahead = useRef({ text: "", at: 0 });
+  /** The folder just left, to land on it when its parent opens. */
+  const lastFolder = useRef<string | null>(null);
+  const returnTo = useRef<string | null>(null);
+  const gridRef = useRef<HTMLUListElement>(null);
   const dragDepth = useRef(0);
   const fileInput = useRef<HTMLInputElement>(null);
   const folderInput = useRef<HTMLInputElement>(null);
@@ -245,6 +267,11 @@ export default function BrowserPage() {
     return () => clearTimeout(timer);
   }, [typed, query, setParams]);
   const searching = query !== "";
+  useEffect(() => {
+    if (!searching) setSearchSort(null);
+  }, [searching]);
+  const sort = searching ? searchSort : folderSort;
+  const changeSort = (next: Sort) => (searching ? setSearchSort(next) : setFolderSort(next));
 
   const listing = useQuery({ queryKey: ["nodes", drive, parent], queryFn: () => api.list(drive, parent) });
   // Under "nodes", so every change that refreshes the folder refreshes the results too.
@@ -291,8 +318,12 @@ export default function BrowserPage() {
 
   useEffect(() => {
     setNotice(null);
+    setUndoable(null);
     setSelected(new Set());
+    setCursor(null);
     anchor.current = null;
+    returnTo.current = lastFolder.current;
+    lastFolder.current = parent;
     return () => {
       makingRun.current?.abort();
       makingRun.current = null;
@@ -301,13 +332,36 @@ export default function BrowserPage() {
   }, [drive, parent, query]);
 
   // While searching, results stand in for the folder: selection and actions work the same.
-  const results = searching ? (search.data?.results ?? []) : [];
+  const results = useMemo(() => (searching ? (search.data?.results ?? []) : []), [searching, search.data]);
   const locations = new Map<string, Crumb[]>(results.map((r) => [r.id, r.path]));
-  const entries: Entry[] = searching ? results : (listing.data?.entries ?? []);
+  const entries: Entry[] = useMemo(() => {
+    const raw = searching ? results : (listing.data?.entries ?? []);
+    return sort ? sortEntries(raw, sort) : raw;
+  }, [searching, results, listing.data, sort]);
   const crumbs = listing.data?.path ?? [];
   const chosen = entries.filter((e) => selected.has(e.id));
   const locationOf = (entry: Entry) => where(drive, locations.get(entry.id) ?? crumbs);
   const selecting = chosen.length > 0;
+
+  const cursorIndex = cursor === null ? -1 : entries.findIndex((e) => e.id === cursor);
+  const cursorEntry = cursorIndex >= 0 ? entries[cursorIndex] : null;
+  /** What an action applies to: the selection, or else the highlighted item. */
+  const targets = selecting ? chosen : cursorEntry ? [cursorEntry] : [];
+
+  // Back in a folder's parent: highlight the folder just left, as file managers do.
+  useEffect(() => {
+    const id = returnTo.current;
+    if (id === null || searching || !entries.some((e) => e.id === id)) return;
+    returnTo.current = null;
+    reveal.current = true;
+    setCursor(id);
+  }, [entries, searching]);
+
+  useEffect(() => {
+    if (!reveal.current || cursor === null) return;
+    reveal.current = false;
+    document.querySelector(`[data-entry="${CSS.escape(cursor)}"]`)?.scrollIntoView({ block: "nearest" });
+  }, [cursor]);
 
   const refresh = () => queryClient.invalidateQueries({ queryKey: ["nodes", drive] });
   const close = () => setOpen(null);
@@ -332,29 +386,118 @@ export default function BrowserPage() {
 
   /** While anything is selected, or with Ctrl/Cmd held, a click selects instead of opening. */
   const claimClick = (index: number) => (e: MouseEvent) => {
+    setCursor(entries[index].id);
     if (selecting || e.ctrlKey || e.metaKey || e.shiftKey) {
       e.preventDefault();
       toggle(index, e.shiftKey);
     }
   };
 
+  /** What clicking it does, without the click: folders open, files preview or download. */
+  function openEntry(entry: Entry) {
+    if (entry.kind === "dir") navigate(driveUrl(drive, entry.id));
+    else if (previewKind(entry.name, entry.size)) setOpen({ type: "preview", entry });
+    else {
+      const link = document.createElement("a");
+      link.href = api.fileUrl(drive, entry.id);
+      link.download = entry.name;
+      link.click();
+    }
+  }
+
+  function goUp() {
+    if (searching || parent === null) return;
+    navigate(driveUrl(drive, crumbs.length > 1 ? crumbs[crumbs.length - 2].id : null));
+  }
+
+  /** How many items a row holds: one in the list, as many as fit across in the grid. */
+  function columns(): number {
+    if (view !== "grid" || !gridRef.current) return 1;
+    return Math.max(getComputedStyle(gridRef.current).gridTemplateColumns.split(" ").filter(Boolean).length, 1);
+  }
+
+  /** Moves the highlight; with Shift, the selection stretches from where it started to here. */
+  function moveCursor(to: number, extend: boolean) {
+    if (entries.length === 0) return;
+    const index = Math.min(Math.max(to, 0), entries.length - 1);
+    if (extend) {
+      const from = anchor.current ?? (cursorIndex >= 0 ? cursorIndex : index);
+      anchor.current = from;
+      const [a, b] = from < index ? [from, index] : [index, from];
+      setSelected(new Set(entries.slice(a, b + 1).map((x) => x.id)));
+    }
+    reveal.current = true;
+    setCursor(entries[index].id);
+  }
+
+  function jumpToTyped(key: string) {
+    const now = Date.now();
+    const t = typeahead.current;
+    t.text = now - t.at < 800 ? t.text + key.toLocaleLowerCase() : key.toLocaleLowerCase();
+    t.at = now;
+    // A repeated single letter steps through the names starting with it.
+    const cycling = t.text.length > 1 && [...t.text].every((c) => c === t.text[0]);
+    const prefix = cycling ? t.text[0] : t.text;
+    const start = cursorIndex < 0 ? 0 : cycling || t.text.length === 1 ? cursorIndex + 1 : cursorIndex;
+    for (let k = 0; k < entries.length; k += 1) {
+      const i = (start + k) % entries.length;
+      if (entries[i].name.toLocaleLowerCase().startsWith(prefix)) return moveCursor(i, false);
+    }
+  }
+
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (open || typingIn(e.target) || document.querySelector("dialog[open]")) return;
+      const mod = e.ctrlKey || e.metaKey;
+      // Enter and Space on a focused button or link belong to it.
+      const onControl =
+        e.target instanceof HTMLElement && e.target !== document.body && e.target.closest("a, button, summary, input, [role=menu]");
+      const page = view === "grid" ? columns() * 4 : 10;
+      const here = cursorIndex;
+      // The first arrow press lands on the first item (or the last, going up) rather than skipping it.
+      const step = (by: number) => (here < 0 ? (by > 0 ? 0 : entries.length - 1) : here + by);
       if (e.key === "/") {
         e.preventDefault();
         searchInput.current?.focus();
-      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "a" && entries.length > 0) {
+      } else if (mod && e.key.toLowerCase() === "a" && entries.length > 0) {
         e.preventDefault();
         setSelected(new Set(entries.map((x) => x.id)));
-      } else if (e.key === "Escape" && selecting) {
-        clearSelection();
-      } else if ((e.key === "Delete" || e.key === "Backspace") && selecting) {
+      } else if (e.key === "Escape" && (selecting || cursor !== null)) {
+        if (selecting) clearSelection();
+        else setCursor(null);
+      } else if (e.key === "ArrowUp" && e.altKey) {
         e.preventDefault();
-        setOpen({ type: "delete", entries: chosen });
-      } else if (e.key === "F2" && chosen.length === 1) {
+        goUp();
+      } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
         e.preventDefault();
-        setOpen({ type: "rename", entry: chosen[0] });
+        const by = view === "grid" ? columns() : 1;
+        moveCursor(step(e.key === "ArrowDown" ? by : -by), e.shiftKey);
+      } else if ((e.key === "ArrowRight" || e.key === "ArrowLeft") && view === "grid" && !e.altKey) {
+        e.preventDefault();
+        moveCursor(step(e.key === "ArrowRight" ? 1 : -1), e.shiftKey);
+      } else if (e.key === "Home" || e.key === "End") {
+        e.preventDefault();
+        moveCursor(e.key === "Home" ? 0 : entries.length - 1, e.shiftKey);
+      } else if (e.key === "PageDown" || e.key === "PageUp") {
+        e.preventDefault();
+        moveCursor(step(e.key === "PageDown" ? page : -page), e.shiftKey);
+      } else if (e.key === "Enter" && cursorEntry && !onControl) {
+        e.preventDefault();
+        openEntry(cursorEntry);
+      } else if (e.key === " " && cursorEntry && !onControl) {
+        e.preventDefault();
+        toggle(cursorIndex, e.shiftKey);
+      } else if ((e.key === "Delete" || (e.key === "Backspace" && selecting)) && targets.length > 0) {
+        e.preventDefault();
+        setOpen({ type: "delete", entries: targets });
+      } else if (e.key === "Backspace") {
+        e.preventDefault();
+        goUp();
+      } else if (e.key === "F2" && targets.length > 0) {
+        e.preventDefault();
+        setOpen(targets.length === 1 ? { type: "rename", entry: targets[0] } : { type: "bulkRename", ...renameItems(targets) });
+      } else if (e.key.length === 1 && !mod && !e.altKey && e.key !== " " && entries.length > 0) {
+        jumpToTyped(e.key);
       }
     }
     document.addEventListener("keydown", onKey);
@@ -409,6 +552,35 @@ export default function BrowserPage() {
     } catch (err) {
       setNotice(err instanceof ApiError ? err.message : "The zip couldn't be started.");
     }
+  }
+
+  /** Puts back the names a bulk rename replaced, if nothing has taken them since. */
+  async function undoRename(renamed: Renamed[]) {
+    setNotice(null);
+    try {
+      await api.renameMany(
+        drive,
+        renamed.map((r) => ({ id: r.id, name: r.from })),
+      );
+      setUndoable(null);
+    } catch (err) {
+      setNotice(err instanceof ApiError ? `Couldn't undo: ${err.message}` : "Couldn't undo the rename.");
+    }
+    await refresh();
+  }
+
+  /** What the bulk rename dialog needs: each item's folder, and the names there it mustn't take. */
+  function renameItems(items: Entry[]) {
+    const ids = new Set(items.map((e) => e.id));
+    const list = items.map((entry) => {
+      const path = searching ? (locations.get(entry.id) ?? []) : crumbs;
+      const last = path[path.length - 1];
+      return { entry, parent: searching ? (last?.id ?? null) : parent, parentName: last?.name ?? drive };
+    });
+    // Only the folder on screen is known in full; for search results the server checks.
+    const others = new Map<string | null, Set<string>>();
+    if (!searching) others.set(parent, new Set(entries.filter((e) => !ids.has(e.id)).map((e) => e.name)));
+    return { items: list, others };
   }
 
   /** Images, videos and comics; others have nothing to draw one from. */
@@ -544,6 +716,24 @@ export default function BrowserPage() {
   }
 
   const allSelected = entries.length > 0 && chosen.length === entries.length;
+
+  /** A list header that sorts by its column; clicking it again flips the direction. */
+  function column(key: SortKey, label: string) {
+    const active = sort?.key === key;
+    const Arrow = sort?.desc ? ArrowDown : ArrowUp;
+    return (
+      <button
+        type="button"
+        onClick={() => changeSort(sortByColumn(sort ?? { ...DEFAULT_SORT, key: "type" }, key))}
+        aria-label={active ? `${label}, sorted ${sort?.desc ? "descending" : "ascending"}` : `Sort by ${label.toLowerCase()}`}
+        title={`Sort by ${label.toLowerCase()}`}
+        className={`inline-flex items-center gap-1 rounded px-1 uppercase tracking-wide hover:text-ink ${active ? "text-ink" : ""}`}
+      >
+        {label}
+        {active && <Arrow size={12} aria-hidden="true" />}
+      </button>
+    );
+  }
 
   return (
     <div
@@ -725,7 +915,10 @@ export default function BrowserPage() {
                 className="w-full rounded-md border border-line bg-surface py-2 pl-9 pr-3 text-sm text-ink placeholder:text-muted focus:border-teal"
               />
             </label>
-            <ViewToggle view={view} onChange={changeView} className="ml-auto sm:ml-0" />
+            <div className="ml-auto flex items-center gap-2 sm:ml-0">
+              <SortMenu sort={sort} onChange={changeSort} relevance={searching} onRelevance={() => setSearchSort(null)} />
+              <ViewToggle view={view} onChange={changeView} />
+            </div>
             <button
               type="button"
               aria-pressed={showDetails}
@@ -744,14 +937,50 @@ export default function BrowserPage() {
             </p>
           )}
 
+          {undoable && (
+            <div className="mt-4 flex items-center gap-3 rounded-md border border-teal/40 bg-teal/5 px-3 py-2 text-sm" role="status">
+              <span className="mr-auto">
+                Renamed {undoable.length} {undoable.length === 1 ? "item" : "items"}.
+              </span>
+              <Button className="py-1" onClick={() => void undoRename(undoable)}>
+                Undo
+              </Button>
+              <button type="button" onClick={() => setUndoable(null)} aria-label="Dismiss" className={ICON_BUTTON}>
+                <X size={16} />
+              </button>
+            </div>
+          )}
+
           {selecting && (
             <div
               role="toolbar"
               aria-label="Selection"
               className="sticky top-2 z-10 mt-4 flex flex-wrap items-center gap-2 rounded-lg border border-teal/40 bg-surface px-3 py-2 shadow-md"
             >
-              <span className="mr-auto text-sm font-medium" aria-live="polite">
+              <span className="text-sm font-medium" aria-live="polite">
                 {chosen.length} selected
+              </span>
+              <span className="mr-auto flex gap-1 text-sm">
+                {!allSelected && (
+                  <button
+                    type="button"
+                    className="rounded px-1.5 py-0.5 text-teal hover:bg-ink/5"
+                    onClick={() => setSelected(new Set(entries.map((x) => x.id)))}
+                  >
+                    All
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="rounded px-1.5 py-0.5 text-teal hover:bg-ink/5"
+                  title="Select what isn't selected, and unselect what is"
+                  onClick={() => {
+                    setSelected((prev) => new Set(entries.filter((x) => !prev.has(x.id)).map((x) => x.id)));
+                    anchor.current = null;
+                  }}
+                >
+                  Invert
+                </button>
               </span>
               {chosen.length === 1 && chosen[0].kind === "file" && (
                 <a
@@ -769,10 +998,23 @@ export default function BrowserPage() {
                   Download zip
                 </Button>
               )}
+              <Button
+                className="py-1.5"
+                title={chosen.length === 1 ? "Rename (F2)" : "Rename them all at once: find and replace, numbering, patterns (F2)"}
+                onClick={() =>
+                  setOpen(chosen.length === 1 ? { type: "rename", entry: chosen[0] } : { type: "bulkRename", ...renameItems(chosen) })
+                }
+              >
+                <Pencil size={16} />
+                {chosen.length === 1 ? "Rename" : "Rename all"}
+              </Button>
               {chosen.length === 1 && (
-                <Button className="py-1.5" onClick={() => setOpen({ type: "rename", entry: chosen[0] })}>
-                  <Pencil size={16} />
-                  Rename
+                <Button
+                  className="py-1.5"
+                  title="Find and replace, numbering, patterns"
+                  onClick={() => setOpen({ type: "bulkRename", ...renameItems(chosen) })}
+                >
+                  Advanced rename
                 </Button>
               )}
               <Button className="py-1.5" onClick={() => setOpen({ type: "move", entries: chosen })}>
@@ -845,16 +1087,18 @@ export default function BrowserPage() {
                     onChange={() => (allSelected ? clearSelection() : setSelected(new Set(entries.map((e) => e.id))))}
                     className="h-4 w-4 accent-[var(--teal)]"
                   />
-                  <span className="flex-1 pl-[52px]">Name</span>
-                  <span className="hidden w-24 text-right sm:block">Size</span>
-                  <span className="hidden w-28 text-right md:block">Added</span>
+                  <span className="flex flex-1 pl-[52px]">{column("name", "Name")}</span>
+                  <span className="hidden w-24 justify-end sm:flex">{column("size", "Size")}</span>
+                  <span className="hidden w-28 justify-end md:flex">{column("created", "Added")}</span>
                   <span className="w-[68px]" aria-hidden="true" />
                 </div>
                 <ul className="divide-y divide-line border-y border-line">
                   {entries.map((entry, i) => (
                     <li
                       key={entry.id}
-                      className={`flex items-center gap-3 pl-1 ${selected.has(entry.id) ? "bg-teal/10" : "hover:bg-ink/[0.03]"}`}
+                      data-entry={entry.id}
+                      aria-current={cursor === entry.id || undefined}
+                      className={`flex scroll-my-16 items-center gap-3 pl-1 ${selected.has(entry.id) ? "bg-teal/10" : "hover:bg-ink/[0.03]"} ${cursor === entry.id ? "outline-2 -outline-offset-2 outline-teal/70" : ""}`}
                     >
                       {checkbox(entry, i)}
                       <Opener
@@ -915,13 +1159,15 @@ export default function BrowserPage() {
             )}
 
             {entries.length > 0 && view === "grid" && (
-              <ul className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
+              <ul ref={gridRef} className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
                 {entries.map((entry, i) => {
                   const isSelected = selected.has(entry.id);
                   return (
                     <li
                       key={entry.id}
-                      className={`group relative rounded-lg border bg-surface ${isSelected ? "border-teal ring-2 ring-teal" : "border-line hover:border-muted"}`}
+                      data-entry={entry.id}
+                      aria-current={cursor === entry.id || undefined}
+                      className={`group relative scroll-my-16 rounded-lg border bg-surface ${isSelected ? "border-teal ring-2 ring-teal" : "border-line hover:border-muted"} ${cursor === entry.id ? "outline-2 outline-offset-2 outline-teal/70" : ""}`}
                     >
                       <Opener
                         drive={drive}
@@ -960,8 +1206,9 @@ export default function BrowserPage() {
 
             {entries.length > 0 && (
               <p className="mt-3 text-xs text-muted">
-                Ctrl/Cmd-click or Shift-click to select several. Ctrl/Cmd+A selects everything, Delete deletes the
-                selection, F2 renames, / searches.
+                Ctrl/Cmd-click or Shift-click to select several. Arrows move, Enter opens, Space selects, Shift+arrows
+                select a range, Backspace goes up, and typing jumps to a name. Ctrl/Cmd+A selects everything, Delete
+                deletes, F2 renames (several at once, too), / searches.
               </p>
             )}
           </div>
@@ -1004,6 +1251,19 @@ export default function BrowserPage() {
           onSubmit={async (name) => {
             await api.rename(drive, open.entry.id, name);
             await refresh();
+            close();
+          }}
+        />
+      )}
+      {open?.type === "bulkRename" && (
+        <BulkRenameDialog
+          drive={drive}
+          items={open.items}
+          others={open.others}
+          onClose={close}
+          onRenamed={(renamed) => {
+            setUndoable(renamed);
+            void refresh();
             close();
           }}
         />

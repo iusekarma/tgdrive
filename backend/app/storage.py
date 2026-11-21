@@ -592,6 +592,28 @@ class Storage:
                 (drive.keys.encrypt_name(node_id, new_name), node_id),
             )
 
+    def rename_many(self, drive: Drive, renames: list[tuple[str, str]]) -> None:
+        """All or nothing. Names are checked as they will be once every rename
+        is done, so items can swap or cycle names (a→b, b→a) in one go."""
+        wanted = dict(renames)   # the last name given for an id wins
+        by_parent: dict[str | None, dict[str, str]] = {}
+        for node_id, new_name in wanted.items():
+            self._check_name(new_name)
+            entry = self.stat(drive, node_id)
+            if entry.name != new_name:
+                by_parent.setdefault(self._node(drive, node_id)["parent_id"], {})[node_id] = new_name
+        for parent_id, group in by_parent.items():
+            old = {self.stat(drive, n).name for n in group}
+            taken = self._names_in(drive, parent_id) - old
+            for new_name in group.values():
+                if new_name in taken:
+                    raise Conflict(f"already exists: {new_name}")
+                taken.add(new_name)
+        with self.conn:
+            self.conn.executemany(
+                "UPDATE nodes SET name_enc = ? WHERE id = ?",
+                [(drive.keys.encrypt_name(n, name), n) for group in by_parent.values() for n, name in group.items()])
+
     def relocate(self, drive: Drive, node_id: str, new_parent_id: str | None, new_name: str) -> None:
         """Moves and renames in one step, so the name is only checked where it lands."""
         node = self._node(drive, node_id)

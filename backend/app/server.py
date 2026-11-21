@@ -182,6 +182,15 @@ class NodesDelete(BaseModel):
     ids: NodeIds
 
 
+class NodeRename(BaseModel):
+    id: str
+    name: str
+
+
+class NodesRename(BaseModel):
+    items: Annotated[list[NodeRename], Field(min_length=1, max_length=10_000)]
+
+
 class ZipCreate(BaseModel):
     ids: NodeIds
     name: str | None = Field(None, max_length=255)
@@ -533,6 +542,15 @@ async def move_nodes(body: NodesMove, request: Request, drive: Drive = Depends(u
     return Response(status_code=204)
 
 
+@router.post("/drives/{name}/nodes/rename")
+async def rename_nodes(body: NodesRename, request: Request, drive: Drive = Depends(unlocked_drive),
+                       store: Storage = Depends(get_store)):
+    """Renames every item or none of them. Items may swap names with each other."""
+    store.rename_many(drive, [(i.id, i.name) for i in body.items])
+    _changed(request)
+    return Response(status_code=204)
+
+
 @router.post("/drives/{name}/nodes/delete")
 async def delete_nodes(body: NodesDelete, request: Request, drive: Drive = Depends(unlocked_drive),
                        store: Storage = Depends(get_store)):
@@ -761,6 +779,33 @@ async def download_zip(zip_id: str, session: Session = Depends(unlocked_vault),
     return StreamingResponse(aiter(archive), media_type="application/zip", headers={
         "Content-Length": str(archive.size),
         "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}",
+        "X-Content-Type-Options": "nosniff",
+        "Cache-Control": "private, no-store",
+    })
+
+
+# Decoding a large photo takes a lot of memory; two at a time is plenty.
+_converting = asyncio.Semaphore(2)
+
+
+@router.get("/drives/{name}/files/{node_id}/preview")
+async def preview_image(node_id: str, drive: Drive = Depends(unlocked_drive), store: Storage = Depends(get_store)):
+    """An image browsers can't show (HEIC), converted to JPEG for viewing.
+    Nothing is kept: each request converts it again."""
+    entry = store.stat(drive, node_id)
+    if entry.kind != "file" or not thumbs.needs_conversion(entry.name):
+        raise HTTPException(400, "this file is shown as it is")
+    if entry.size > thumbs.SOURCE_MAX:
+        raise HTTPException(413, "image is too large to convert")
+    async with _converting:
+        data = b"".join([c async for c in store.download(drive, node_id)])
+        jpeg = await asyncio.to_thread(thumbs.to_jpeg, data)
+        # The whole image is here anyway, so its details cost nothing extra.
+        details = await asyncio.to_thread(thumbs.describe, data)
+    if details:
+        store.set_info(drive, node_id, details)
+    return Response(jpeg, media_type="image/jpeg", headers={
+        "Content-Disposition": f"inline; filename*=UTF-8''{quote(os.path.splitext(entry.name)[0] + '.jpg')}",
         "X-Content-Type-Options": "nosniff",
         "Cache-Control": "private, no-store",
     })

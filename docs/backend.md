@@ -132,8 +132,13 @@ semaphore of 2.
 ### Folder tree
 
 `list`, `stat`, `find`, `path` (breadcrumbs), `mkdir` (with `exist_ok` for
-folder uploads), `rename`, `move`, `move_many` (all-or-nothing, and refuses
+folder uploads), `rename`, `rename_many`, `move`, `move_many` (all-or-nothing, and refuses
 to move a folder into itself), and `search`.
+
+`rename_many(drive, [(id, name), ...])` is all-or-nothing too. Each folder's
+names are checked as they will be once every rename is done (the old names
+of the items being renamed are free), so items can swap or cycle names in
+one call, and the rows are updated in one transaction.
 
 `search(drive, query)` splits the query into words, decrypts every name in
 the drive, keeps names containing every word (case-insensitive), and ranks
@@ -456,7 +461,9 @@ folder and node changes, completed uploads.
 
 `make(data)` turns untrusted image bytes into a thumbnail:
 
-1. Open with Pillow; accept only JPEG, MPO, PNG, GIF, WebP, BMP, AVIF.
+1. Open with Pillow; accept only JPEG, MPO, PNG, GIF, WebP, BMP, AVIF, and
+   HEIF/HEIC when `pillow-heif` is installed (`HEIF`; it registers itself
+   with Pillow on import).
 2. Refuse anything over 64 megapixels before decoding.
 3. Decode JPEGs at reduced scale (`draft`), apply EXIF rotation, scale to
    fit 320 × 320.
@@ -465,6 +472,12 @@ folder and node changes, completed uploads.
 Any failure raises `BadImage`. `can_generate(name, size)` says whether the
 server will make one itself (known image extension, at most 50 MB).
 `UPLOAD_MAX` caps browser-sent thumbnails at 4 MB.
+
+`to_jpeg(data)` converts an image browsers can't show (`needs_conversion(name)`:
+`.heic`, `.heif`, `.hif`) to a JPEG for viewing: upright, at most 4096 px on
+its longest side, quality 88, no metadata. `GET /files/{id}/preview` serves
+it, two conversions at a time, and saves what `describe` finds while it has
+the whole image; nothing is kept, so each view converts again.
 
 `describe(data)` reads an image's headers only: its shown width and height
 (EXIF rotation applied), and the EXIF date taken and camera, if present.

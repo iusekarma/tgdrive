@@ -224,6 +224,9 @@ export const api = {
   /** For a closing tab, so other devices needn't wait for it to time out. */
   leaveUploads: (client: string) =>
     navigator.sendBeacon("/api/uploads/leave", new Blob([JSON.stringify({ client })], { type: "application/json" })),
+  /** All or nothing; items may swap names with each other. */
+  renameMany: (drive: string, items: { id: string; name: string }[]) =>
+    request<void>("POST", `${drivePath(drive)}/nodes/rename`, { items }),
   removeMany: (drive: string, ids: string[]) => request<void>("POST", `${drivePath(drive)}/nodes/delete`, { ids }),
 
   /** Folders and several items download as one zip: this returns the link to fetch it from. */
@@ -237,6 +240,8 @@ export const api = {
       inline: "true", offset: String(offset), length: String(length), filename: name,
     })}`,
   /** Read from the database only: never makes the server fetch the file. */
+  /** A HEIC image converted to JPEG for viewing (see `isConvertedImage`). */
+  previewUrl: (drive: string, id: string) => `/api${drivePath(drive)}/files/${id}/preview`,
   fileInfo: (drive: string, id: string) => request<FileInfo>("GET", `${drivePath(drive)}/files/${id}/info`),
   /** Merges what is sent into what is known and returns it all. */
   putFileInfo: (drive: string, id: string, info: FileInfo) =>

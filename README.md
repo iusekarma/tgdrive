@@ -435,6 +435,7 @@ Interactive docs are served at **http://localhost:8000/api/docs**.
 | PATCH | `/api/drives/{name}/nodes/{id}` | Rename and/or move |
 | DELETE | `/api/drives/{name}/nodes/{id}` | Delete a file or folder |
 | POST | `/api/drives/{name}/nodes/move` · `/nodes/delete` | Move or delete many at once (`{"ids": [...]}`) |
+| POST | `/api/drives/{name}/nodes/rename` | Rename many at once, all or none (`{"items": [{"id", "name"}]}`); items may swap names |
 | PUT | `/api/drives/{name}/files?filename=X&parent=ID` | Upload in one request; the body is the raw file |
 | POST | `/api/drives/{name}/uploads` | Start a resumable upload (`{"filename", "parent_id", "size"}`) |
 | PUT | `/api/drives/{name}/uploads/{id}?offset=N` | Send the file from byte N; 201 when complete, 503 if Telegram gave up (resume later) |
@@ -445,6 +446,7 @@ Interactive docs are served at **http://localhost:8000/api/docs**.
 | POST | `/api/drives/{name}/zips` | Start a zip of `ids` (folders included); answers with the `url` to fetch it from |
 | GET | `/api/drives/{name}/zips/{id}` | The zip, streamed as it is built (stored, not compressed; length known up front) |
 | GET · PUT · DELETE | `/api/drives/{name}/files/{id}/thumbnail` | Get, upload, or forget (to make a new one) a 320px WebP thumbnail |
+| GET | `/api/drives/{name}/files/{id}/preview` | A HEIC/HEIF image (up to 50 MB) converted to JPEG for viewing |
 | GET · PUT | `/api/drives/{name}/files/{id}/info` | Get or merge a file's details (dimensions, length, dates, camera) |
 
 Drive routes answer 401 with `"locked": "vault"` or `"locked": "drive"` to

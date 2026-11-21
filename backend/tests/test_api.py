@@ -14,7 +14,7 @@ try:
 except ImportError:
     raise unittest.SkipTest("fastapi is not installed")
 
-from app import crypto, zipstream
+from app import crypto, thumbs, zipstream
 from app.config import Config
 from app.server import COOKIE, create_app
 
@@ -305,6 +305,22 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(names(), [])
         self.assertEqual(c.post("/api/drives/main/nodes/delete", json={"ids": []}).status_code, 422)
 
+    def test_bulk_rename(self):
+        c = self.c
+        ids = [c.put("/api/drives/main/files", params={"filename": f"f{i}"}, content=b"x").json()["id"]
+               for i in range(2)]
+        names = lambda: [e["name"] for e in c.get("/api/drives/main/nodes").json()["entries"]]
+        r = c.post("/api/drives/main/nodes/rename",
+                   json={"items": [{"id": ids[0], "name": "f1"}, {"id": ids[1], "name": "f0"}]})
+        self.assertEqual(r.status_code, 204)
+        self.assertEqual({e["id"]: e["name"] for e in c.get("/api/drives/main/nodes").json()["entries"]},
+                         {ids[0]: "f1", ids[1]: "f0"})
+        r = c.post("/api/drives/main/nodes/rename",
+                   json={"items": [{"id": ids[0], "name": "g"}, {"id": ids[1], "name": "g"}]})
+        self.assertEqual(r.status_code, 409)
+        self.assertEqual(sorted(names()), ["f0", "f1"])
+        self.assertEqual(c.post("/api/drives/main/nodes/rename", json={"items": []}).status_code, 422)
+
     def test_thumbnails(self):
         c = self.c
         buf = BytesIO()
@@ -325,6 +341,27 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(c.delete(url).status_code, 204)          # to make a new one
         self.assertEqual(c.get(url).status_code, 404)
         self.assertFalse(c.get("/api/drives/main/nodes").json()["entries"][1]["thumb"])
+
+    @unittest.skipUnless(thumbs.HEIF, "pillow-heif is not installed")
+    def test_heic_preview_and_thumbnail(self):
+        c = self.c
+        buf = BytesIO()
+        exif = Image.Exif()
+        exif[0x0110] = "iPhone 15"
+        Image.new("RGB", (640, 480), (200, 40, 40)).save(buf, "HEIF", exif=exif.tobytes())
+        photo = c.put("/api/drives/main/files", params={"filename": "IMG_1.HEIC"}, content=buf.getvalue()).json()
+        r = c.get(f"/api/drives/main/files/{photo['id']}/preview")
+        self.assertEqual((r.status_code, r.headers["content-type"]), (200, "image/jpeg"))
+        with Image.open(BytesIO(r.content)) as im:
+            self.assertEqual((im.format, im.size), ("JPEG", (640, 480)))
+        info = c.get(f"/api/drives/main/files/{photo['id']}/info").json()
+        self.assertEqual((info["width"], info["height"], info["camera"]), (640, 480, "iPhone 15"))
+        r = c.get(f"/api/drives/main/files/{photo['id']}/thumbnail")
+        self.assertEqual((r.status_code, r.headers["content-type"]), (200, "image/webp"))
+        plain = c.put("/api/drives/main/files", params={"filename": "a.jpg"}, content=b"x").json()
+        self.assertEqual(c.get(f"/api/drives/main/files/{plain['id']}/preview").status_code, 400)
+        fake = c.put("/api/drives/main/files", params={"filename": "b.heic"}, content=b"not an image").json()
+        self.assertEqual(c.get(f"/api/drives/main/files/{fake['id']}/preview").status_code, 400)
 
     def test_file_info(self):
         c = self.c

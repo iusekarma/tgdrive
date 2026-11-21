@@ -10,7 +10,7 @@ import {
 
 import { api, type Entry, type FileInfo } from "../api";
 import { seconds, useLearn } from "../fileinfo";
-import { formatDate, formatSize, isTransportStream, previewKind } from "../format";
+import { formatDate, formatSize, isConvertedImage, isTransportStream, previewKind } from "../format";
 import { frameTime, sendFrame, sendPicture, sendVideoFrame } from "../thumbs";
 import { byName, junk, listZip, pageType, readZipEntry, zipEntryStart, type ZipEntry } from "../zip";
 import { EntryDetails } from "./details";
@@ -1051,12 +1051,20 @@ function Stage({
   const pictured = useRef(entry.thumb);
   // Images, and PDFs small enough to hold in memory, are fetched here so progress can be shown.
   const pdfInMemory = kind === "pdf" && entry.size <= PDF_IN_MEMORY;
-  const file = useLoadedFile(inlineUrl, kind === "image" || pdfInMemory, pdfInMemory ? "application/pdf" : undefined);
+  // HEIC is converted on the server: nothing arrives until it is done, and the JPEG is a size of its own.
+  const converted = kind === "image" && isConvertedImage(entry.name);
+  const file = useLoadedFile(
+    converted ? api.previewUrl(drive, entry.id) : inlineUrl,
+    kind === "image" || pdfInMemory,
+    pdfInMemory ? "application/pdf" : undefined,
+  );
   const [framed, setFramed] = useState(false);
 
   if (kind === "image") {
     if (failed || file.failed) return <Unplayable what="image" />;
-    if (!file.src) return <Loading loaded={file.loaded} total={entry.size} />;
+    if (!file.src) {
+      return converted ? <Loading label="Converting…" /> : <Loading loaded={file.loaded} total={entry.size} />;
+    }
     return (
       <img
         src={file.src}
@@ -1065,7 +1073,8 @@ function Stage({
         onError={() => setFailed(true)}
         onLoad={(e) => {
           const img = e.currentTarget;
-          learn({ width: img.naturalWidth, height: img.naturalHeight });
+          // A converted image may be scaled down; the server read the real size while converting.
+          if (!converted) learn({ width: img.naturalWidth, height: img.naturalHeight });
           // Opened without a thumbnail: the image is here, so make it one.
           if (pictured.current) return;
           pictured.current = true;
