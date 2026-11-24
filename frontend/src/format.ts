@@ -35,6 +35,9 @@ const KINDS: Record<PreviewKind, string[]> = {
   comic: ["cbz"],
 };
 
+/** Asked of every file in a folder at once, so looked up rather than searched for. */
+const KIND_OF = new Map((Object.keys(KINDS) as PreviewKind[]).flatMap((kind) => KINDS[kind].map((ext) => [ext, kind] as const)));
+
 /** ".ts" is TypeScript or an MPEG transport stream; source files this large are rare. */
 const TS_TEXT_MAX = 1024 * 1024;
 
@@ -47,10 +50,7 @@ export function previewKind(name: string, size = 0): PreviewKind | null {
   const ext = extension(name);
   if (!ext) return null;
   if (ext === "ts") return size > TS_TEXT_MAX ? "video" : "text";
-  for (const kind of Object.keys(KINDS) as PreviewKind[]) {
-    if (KINDS[kind].includes(ext)) return kind;
-  }
-  return null;
+  return KIND_OF.get(ext) ?? null;
 }
 
 /** Images browsers can't show (HEIC): the server converts them to JPEG for viewing. */

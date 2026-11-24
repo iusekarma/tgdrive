@@ -90,7 +90,7 @@ pushed to worker threads with `asyncio.to_thread`:
 |---|---|---|
 | Argon2id (password checks) | thread | 2 at once (`_kdf_gate`); each run uses 64 MiB |
 | Chunk encrypt/decrypt | thread | one per active upload/download |
-| Thumbnail generation (Pillow) | thread | 2 server-made at once (`_thumb_gate`) |
+| Thumbnail generation (Pillow) | thread | 2 server-made at once (`_thumb_gate`), of up to 3 whose files are being fetched (`_thumb_fetch_gate`) |
 | All SQLite access | event loop thread | — |
 
 ## Startup and shutdown

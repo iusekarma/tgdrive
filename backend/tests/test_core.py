@@ -130,6 +130,51 @@ class CoreTest(unittest.IsolatedAsyncioTestCase):
         await self.store.delete(self.drive, nid)
         self.assertEqual((len(self.store._blobs), self.store._blob_total), (0, 0))
 
+    async def test_fetch_ahead(self):
+        self.store.blob_cache_bytes = 2 * (CHUNK + crypto.CHUNK_OVERHEAD)
+        gets, running, most = [], 0, 0
+        real_get = self.transport.get
+
+        async def counting_get(ref):
+            nonlocal running, most
+            gets.append(ref.message_id)
+            running += 1
+            most = max(most, running)
+            await asyncio.sleep(0.01)
+            running -= 1
+            return await real_get(ref)
+
+        self.transport.get = counting_get
+        data = os.urandom(3 * CHUNK)
+        nid = await self.store.upload(self.drive, None, "comic.cbz", gen(data))
+
+        async def part(start, end):
+            return b"".join([c async for c in self.store.download(self.drive, nid, start, end)])
+
+        # The end and the start of the file are fetched together, each once.
+        self.store.fetch_ahead(self.drive, nid, 0)
+        self.assertEqual(await part(len(data) - 10, len(data)), data[-10:])
+        self.assertEqual(await part(0, 10), data[:10])
+        self.assertEqual((len(gets), most), (2, 2))
+
+        self.store.fetch_ahead(self.drive, nid, 0)             # already here
+        self.store.fetch_ahead(self.drive, nid, len(data) * 2)  # past the end
+        self.store.blob_cache_bytes = CHUNK                     # no room to keep it
+        self.store.fetch_ahead(self.drive, nid, CHUNK)
+        await asyncio.sleep(0.03)
+        self.assertEqual(len(gets), 2)
+
+        # A failure is left to whoever really reads the chunk.
+        async def broken(ref):
+            raise RuntimeError("unreachable")
+
+        self.store.blob_cache_bytes = 2 * (CHUNK + crypto.CHUNK_OVERHEAD)
+        self.transport.get = broken
+        self.store.fetch_ahead(self.drive, nid, CHUNK)
+        await asyncio.sleep(0.01)
+        self.transport.get = real_get
+        self.assertEqual(await part(CHUNK, CHUNK + 10), data[CHUNK:CHUNK + 10])
+
     async def test_folders_and_delete(self):
         d = self.store.mkdir(self.drive, None, "docs")
         sub = self.store.mkdir(self.drive, d, "deep")

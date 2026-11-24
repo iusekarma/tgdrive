@@ -245,13 +245,19 @@ pack and slices its own bytes out; the cache below then serves the
 neighbouring files from the same fetch.
 
 Chunks go through `_get_blob()`, which keeps recently read blobs in memory,
-**still encrypted**, up to `TGDRIVE_CHUNK_CACHE_MB` (64 by default; `0`
+**still encrypted**, up to `TGDRIVE_CHUNK_CACHE_MB` (128 by default; `0`
 turns it off), evicting the least recently used. Readers that make many
 small range requests into one chunk (a comic's pages, a zip's index, a
 video player seeking about) fetch it from Telegram once. Requests for a
 blob already being fetched wait on that fetch (shielded, so one client
 going away doesn't cancel it for the others). Deleted files' blobs are
 dropped from it in `discard()`.
+
+`fetch_ahead(drive, id, offset)` (the download endpoint's `ahead`) starts
+fetching a chunk into this cache without waiting for it, so a reader that
+needs two far-apart chunks, as a comic's cover needs the zip's index at the
+end and then the first page, has both downloaded at once on one connection.
+It does nothing if the cache couldn't hold two chunks.
 
 ### Deleting
 

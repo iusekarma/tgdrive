@@ -238,6 +238,8 @@ export const api = {
     request<{ id: string; url: string }>("POST", `${drivePath(drive)}/zips`, { ids, name }),
   fileUrl: (drive: string, id: string, inline = false) =>
     `/api${drivePath(drive)}/files/${id}${inline ? "?inline=true" : ""}`,
+  /** The same file, and the server starts on the chunk holding byte `ahead`, which will be read next. */
+  fileUrlAhead: (drive: string, id: string, ahead: number) => `/api${drivePath(drive)}/files/${id}?ahead=${ahead}`,
   /** `length` bytes from `offset`, served as a file called `name` (a file stored uncompressed in a zip). */
   fileSliceUrl: (drive: string, id: string, offset: number, length: number, name: string) =>
     `/api${drivePath(drive)}/files/${id}?${new URLSearchParams({

@@ -36,7 +36,7 @@ import { AddCards, AddMenu, Breadcrumbs, FilterTabs, SearchBox, SelectionBar, Sh
 import { DetailsDialog, DetailsPanel } from "../components/details";
 import { BulkRenameDialog, type Renamed } from "../components/BulkRenameDialog";
 import { DeleteNodeDialog, MoveDialog, NameDialog } from "../components/fileDialogs";
-import { GridView, ListingSkeleton, ListView, type ListingProps } from "../components/listing";
+import { GridView, ListingSkeleton, ListView, type ListingHandle, type ListingProps } from "../components/listing";
 import { Menu, MENU_ROW, MenuDivider, MenuItem } from "../components/menu";
 import { Dock, Page, scrollToTop, Toast, Topbar } from "../components/shell";
 import { SortMenu } from "../components/SortMenu";
@@ -44,11 +44,12 @@ import { Viewer } from "../components/viewer";
 import { Button, ErrorNote, ICON_BUTTON, useSavedView, ViewToggle } from "../components/ui";
 import { pickedFromInput, readDropped, useUploads, type Picked } from "../components/uploads";
 import { category, countCategories, type Category } from "../filters";
+import { refreshSoon } from "../refresh";
 import type { RenameItem } from "../rename";
 import { useSavedFlag } from "../saved";
 import { DEFAULT_SORT, sortByColumn, sortEntries, useSavedSort, type Sort } from "../sorting";
 import { driveUrl, formatSize, previewKind } from "../format";
-import { forgetThumbnails, makeThumbnail, regenerateThumbnail } from "../thumbs";
+import { forgetThumbnails, hasNoCover, makeThumbnail, MAKE_PARALLEL, regenerateThumbnail } from "../thumbs";
 
 type Open =
   | { type: "newFolder" }
@@ -136,6 +137,7 @@ export default function BrowserPage() {
   const [cursor, setCursor] = useState<string | null>(null);
   /** Set when the cursor moves by keyboard, so the item scrolls into view. */
   const reveal = useRef(false);
+  const listingHandle = useRef<ListingHandle>(null);
   /** Type-ahead: letters typed in quick succession jump to a name starting with them. */
   const typeahead = useRef({ text: "", at: 0 });
   /** The folder just left, to land on it when its parent opens. */
@@ -242,6 +244,7 @@ export default function BrowserPage() {
     () => (shownFilter ? everything.filter((e) => category(e) === shownFilter) : everything),
     [everything, shownFilter],
   );
+  const summary = useMemo(() => summarize(everything), [everything]);
   const crumbs = listing.data?.path ?? [];
   const chosen = entries.filter((e) => selected.has(e.id));
   const locationOf = (entry: Entry) => where(drive, locations.get(entry.id) ?? crumbs);
@@ -264,8 +267,8 @@ export default function BrowserPage() {
   useEffect(() => {
     if (!reveal.current || cursor === null) return;
     reveal.current = false;
-    document.querySelector(`[data-entry="${CSS.escape(cursor)}"]`)?.scrollIntoView({ block: "nearest" });
-  }, [cursor]);
+    if (cursorIndex >= 0) listingHandle.current?.reveal(cursorIndex);
+  }, [cursor, cursorIndex]);
 
   const refresh = () => queryClient.invalidateQueries({ queryKey: ["nodes", drive] });
   const close = () => setOpen(null);
@@ -314,34 +317,9 @@ export default function BrowserPage() {
     navigate(driveUrl(drive, crumbs.length > 1 ? crumbs[crumbs.length - 2].id : null));
   }
 
-  /** The item a row up or down from the highlight, by where they are on screen: a
-   * row's length depends on the window, and folders' rows aren't files'. */
-  function rowAway(dir: 1 | -1, from: number): number {
-    if (view !== "grid") return from + dir;
-    const box = (i: number) =>
-      document.querySelector(`[data-entry="${CSS.escape(entries[i].id)}"]`)?.getBoundingClientRect();
-    const start = box(from);
-    if (!start) return from + dir;
-    let best = -1;
-    let row: number | null = null;
-    let gap = Infinity;
-    for (let i = from + dir; i >= 0 && i < entries.length; i += dir) {
-      const r = box(i);
-      if (!r || Math.abs(r.top - start.top) < 2) continue;
-      if (row === null) row = r.top;
-      else if (Math.abs(r.top - row) >= 2) break;
-      if (Math.abs(r.left - start.left) < gap) {
-        gap = Math.abs(r.left - start.left);
-        best = i;
-      }
-    }
-    // Already on the first or last row.
-    return best >= 0 ? best : dir > 0 ? entries.length - 1 : 0;
-  }
-
   function rowsAway(dir: 1 | -1, rows: number): number {
     let at = cursorIndex;
-    for (let n = 0; n < rows; n += 1) at = Math.min(Math.max(rowAway(dir, at), 0), entries.length - 1);
+    for (let n = 0; n < rows; n += 1) at = listingHandle.current?.rowAway(dir, at) ?? at;
     return at;
   }
 
@@ -542,13 +520,13 @@ export default function BrowserPage() {
     return { items: list, others };
   }
 
-  /** Images, videos and comics; others have nothing to draw one from. */
+  /** Images, videos, comics and audio (its cover art); others have nothing to draw one from. */
   const canThumbnail = (entry: Entry) =>
-    entry.kind === "file" && ["image", "video", "comic"].includes(previewKind(entry.name, entry.size) ?? "");
+    entry.kind === "file" && ["image", "video", "comic", "audio"].includes(previewKind(entry.name, entry.size) ?? "");
 
-  const missingThumbnails = searching ? [] : everything.filter((e) => canThumbnail(e) && !e.thumb);
+  const missingThumbnails = searching ? [] : everything.filter((e) => canThumbnail(e) && !e.thumb && !hasNoCover(drive, e.id));
 
-  /** One file at a time, so Telegram and the browser's connections stay free for browsing. */
+  /** A few files at a time, so Telegram and the browser's connections stay free for browsing. */
   async function makeThumbnails() {
     const todo = missingThumbnails;
     if (makingRun.current || todo.length === 0) return;
@@ -556,17 +534,30 @@ export default function BrowserPage() {
     makingRun.current = run;
     setNotice(null);
     setMaking({ done: 0, total: todo.length });
+    let done = 0;
     let failed = 0;
-    for (const [i, entry] of todo.entries()) {
-      if (run.signal.aborted) return;
-      if (await makeThumbnail(drive, entry, run.signal)) void refresh();
-      else failed += 1;
-      if (run.signal.aborted) return;
-      setMaking({ done: i + 1, total: todo.length });
+    let bare = 0;
+    const rest = todo.values();   // shared: each worker takes the next file
+    async function work() {
+      for (const entry of rest) {
+        if (run.signal.aborted) return;
+        const made = await makeThumbnail(drive, entry, run.signal);
+        if (run.signal.aborted) return;
+        if (made) refreshSoon(queryClient, drive);
+        else if (hasNoCover(drive, entry.id)) bare += 1;
+        else failed += 1;
+        done += 1;
+        setMaking({ done, total: todo.length });
+      }
     }
+    await Promise.all(Array.from({ length: MAKE_PARALLEL }, work));
+    if (run.signal.aborted) return;
     makingRun.current = null;
     setMaking(null);
-    if (failed) setNotice(`${failed} of ${todo.length} files couldn't get a thumbnail.`);
+    const notes = [];
+    if (failed) notes.push(`${failed} of ${todo.length} files couldn't get a thumbnail.`);
+    if (bare) notes.push(`${bare} audio ${bare === 1 ? "file has" : "files have"} no cover art.`);
+    if (notes.length) setNotice(notes.join(" "));
   }
 
   function stopMakingThumbnails() {
@@ -579,7 +570,12 @@ export default function BrowserPage() {
     setNotice(null);
     const made = await regenerateThumbnail(drive, entry);
     void refresh();
-    if (!made) setNotice(`A thumbnail couldn't be made for ${entry.name}.`);
+    if (made) return;
+    setNotice(
+      hasNoCover(drive, entry.id)
+        ? `${entry.name} has no cover art.`
+        : `A thumbnail couldn't be made for ${entry.name}.`,
+    );
   }
 
   function itemMenu(entry: Entry) {
@@ -676,6 +672,7 @@ export default function BrowserPage() {
     onNewFolder: () => setOpen({ type: "newFolder" }),
   };
   const listingProps: ListingProps = {
+    handle: listingHandle,
     drive,
     entries,
     selected,
@@ -817,7 +814,7 @@ export default function BrowserPage() {
                           ? `The best ${search.data.results.length} of ${search.data.total} matches in ${searched}`
                           : `${search.data?.total ?? 0} ${search.data?.total === 1 ? "match" : "matches"} in ${searched}`
                     : listing.data
-                      ? summarize(everything)
+                      ? summary
                       : "Loading…"}
                 </p>
                 {searching && parent !== null && (
@@ -834,7 +831,7 @@ export default function BrowserPage() {
                   <button
                     type="button"
                     onClick={() => void makeThumbnails()}
-                    title={`${missingThumbnails.length} images, videos and comics here have no thumbnail`}
+                    title={`${missingThumbnails.length} images, videos, comics and audio files here have no thumbnail`}
                     className="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-lg bg-ink/6 px-2.5 text-[13px] text-ink transition-colors hover:bg-ink/10"
                   >
                     <Images size={14} aria-hidden="true" />

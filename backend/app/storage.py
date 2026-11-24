@@ -209,7 +209,8 @@ class Storage:
         #: being upgraded on unlock), so it can be backed up.
         self.on_change: Callable[[], None] = lambda: None
         self._kdf_gate = asyncio.Semaphore(2)  # each Argon2id run holds 64 MiB
-        self._thumb_gate = asyncio.Semaphore(2)
+        self._thumb_fetch_gate = asyncio.Semaphore(3)
+        self._thumb_gate = asyncio.Semaphore(2)  # decoding a large image takes a lot of memory
         self._thumb_locks: dict[str, asyncio.Lock] = {}
         self._uploads: dict[str, UploadState] = {}
         self._thumb_failed: set[str] = set()
@@ -1031,12 +1032,32 @@ class Storage:
         if blob is not None:
             self._blobs.move_to_end(key)
             return blob
+        return await asyncio.shield(self._fetch_blob(ref))
+
+    def _fetch_blob(self, ref: BlobRef) -> asyncio.Future[bytes]:
+        key = (ref.chat_id, ref.message_id)
         fetch = self._blob_fetches.get(key)
         if fetch is None:
             fetch = asyncio.ensure_future(self.transport.get(ref))
             self._blob_fetches[key] = fetch
             fetch.add_done_callback(lambda f: self._blob_fetched(key, f))
-        return await asyncio.shield(fetch)
+        return fetch
+
+    def fetch_ahead(self, drive: Drive, node_id: str, offset: int) -> None:
+        """Starts fetching the chunk that holds `offset` into the chunk cache and
+        returns at once, for a reader that will want it next. Best effort:
+        nothing happens if the cache couldn't hold it and the chunk being
+        read meanwhile."""
+        node = self._node(drive, node_id)
+        if node["kind"] != "file" or node["state"] != "ready" or node_id in self._waiting:
+            return
+        if self.blob_cache_bytes < 2 * (node["chunk_size"] + crypto.CHUNK_OVERHEAD):
+            return
+        row = self.conn.execute("SELECT * FROM chunks WHERE node_id = ? AND idx = ?",
+                                (node_id, offset // node["chunk_size"])).fetchone()
+        if row is None or (row["chat_id"], row["message_id"]) in self._blobs:
+            return
+        self._fetch_blob(BlobRef(row["chat_id"], row["message_id"], row["file_id"]))
 
     def _blob_fetched(self, key: tuple[str, int], fetch: asyncio.Future[bytes]) -> None:
         self._blob_fetches.pop(key, None)
@@ -1262,17 +1283,18 @@ class Storage:
             try:
                 async with lock:
                     if not os.path.exists(path):
-                        async with self._thumb_gate:
+                        async with self._thumb_fetch_gate:
                             data = b"".join([c async for c in self.download(drive, node_id)])
-                            # The whole image is here anyway, so its details cost nothing extra.
-                            details = await asyncio.to_thread(thumbs.describe, data)
-                            if details:
-                                self.set_info(drive, node_id, details)
-                            try:
-                                await self.set_thumbnail(drive, node_id, data)
-                            except thumbs.BadImage:
-                                self._thumb_failed.add(node_id)
-                                return None
+                            async with self._thumb_gate:
+                                # The whole image is here anyway, so its details cost nothing extra.
+                                details = await asyncio.to_thread(thumbs.describe, data)
+                                if details:
+                                    self.set_info(drive, node_id, details)
+                                try:
+                                    await self.set_thumbnail(drive, node_id, data)
+                                except thumbs.BadImage:
+                                    self._thumb_failed.add(node_id)
+                                    return None
             finally:
                 if not lock.locked():
                     self._thumb_locks.pop(node_id, None)

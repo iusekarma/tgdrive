@@ -635,7 +635,10 @@ function Player({
       )}
       {waiting && !lost && (
         <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-          <Loading />
+          {/* A soft shadow, so it shows on a bright frame too. */}
+          <div className="flex size-44 items-center justify-center bg-[radial-gradient(closest-side,rgb(0_0_0/0.72),rgb(0_0_0/0.6)_55%,transparent)]">
+            <Loading />
+          </div>
         </div>
       )}
       {lost && (

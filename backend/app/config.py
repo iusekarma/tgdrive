@@ -21,7 +21,7 @@ class Config:
     admin_password: str | None = None
     thumb_dir: str | None = None
     thumb_cache_mb: int = 512           # 0 means no limit
-    chunk_cache_mb: int = 64            # recently read chunks, kept encrypted in memory; 0 turns it off
+    chunk_cache_mb: int = 128           # recently read chunks, kept encrypted in memory; 0 turns it off
     static_dir: str | None = None       # the built web UI, served at / when set
     pack_small_files: bool = True       # small files share Telegram messages; see Storage
     pack_max_file_mb: float = 4.0       # what counts as small (at most the chunk size)
@@ -55,7 +55,7 @@ class Config:
             admin_password=os.environ.get("TGDRIVE_ADMIN_PASSWORD") or None,
             thumb_dir=os.path.join(os.environ.get("TGDRIVE_CACHE_DIR", "./cache"), "thumbs"),
             thumb_cache_mb=int(os.environ.get("TGDRIVE_THUMB_CACHE_MB", "512")),
-            chunk_cache_mb=int(os.environ.get("TGDRIVE_CHUNK_CACHE_MB", "64")),
+            chunk_cache_mb=int(os.environ.get("TGDRIVE_CHUNK_CACHE_MB", "128")),
             static_dir=os.environ.get("TGDRIVE_STATIC_DIR") or None,
             pack_small_files=os.environ.get("TGDRIVE_PACK_SMALL_FILES", "true").lower() in ("1", "true", "yes"),
             pack_max_file_mb=float(os.environ.get("TGDRIVE_PACK_MAX_FILE_MB", "4")),

@@ -1,5 +1,15 @@
-import { ArrowDown, ArrowUp, BookOpen, Download, Play } from "lucide-react";
-import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
+import { ArrowDown, ArrowUp, BookOpen, Download, Music, Play } from "lucide-react";
+import {
+  useEffect,
+  useImperativeHandle,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type MouseEvent,
+  type ReactNode,
+  type Ref,
+  type RefObject,
+} from "react";
 import { Link } from "react-router-dom";
 
 import { api, type Entry } from "../api";
@@ -7,43 +17,35 @@ import { driveUrl, formatDate, formatSize, previewKind, typeName } from "../form
 import type { Sort, SortKey } from "../sorting";
 import { cachedThumbnail, hasThumbnail, loadThumbnail, useThumbnailVersion } from "../thumbs";
 import { KindIcon } from "./details";
+import { scrollToRow, useVisibleRows } from "./rows";
 import { ICON_BUTTON } from "./ui";
 
-/** Fetched when scrolled into view, a few at a time; an icon until then or if there is none. */
+/** A row scrolled straight past doesn't ask for its thumbnail. */
+const THUMB_DELAY = 100;
+
+/** Fetched once it has been in view for a moment, a few at a time; an icon until then or if there is none. */
 function Thumb({ drive, entry, large = false }: { drive: string; entry: Entry; large?: boolean }) {
   const wanted = hasThumbnail(entry);
   const [url, setUrl] = useState<string | null | undefined>(() => (wanted ? cachedThumbnail(drive, entry.id) : null));
-  const ref = useRef<HTMLSpanElement>(null);
   const version = useThumbnailVersion(drive, entry.id);
 
   useEffect(() => {
     if (!wanted) return setUrl(null);
     const cached = cachedThumbnail(drive, entry.id);
     if (cached !== undefined) return setUrl(cached);
-    const el = ref.current;
-    if (!el) return;
     let live = true;
-    // The margin only counts for the element that scrolls: the panel on wide screens, else the window.
-    const panel = el.closest("[data-scroller]");
-    const root = panel && getComputedStyle(panel).overflowY !== "visible" ? panel : null;
-    const observer = new IntersectionObserver(
-      (items) => {
-        if (!items.some((i) => i.isIntersecting)) return;
-        observer.disconnect();
-        void loadThumbnail(drive, entry.id).then((u) => live && setUrl(u));
-      },
-      { root, rootMargin: "200px" },
-    );
-    observer.observe(el);
+    const timer = setTimeout(() => {
+      void loadThumbnail(drive, entry.id).then((u) => live && setUrl(u));
+    }, THUMB_DELAY);
     return () => {
       live = false;
-      observer.disconnect();
+      clearTimeout(timer);
     };
   }, [drive, entry.id, entry.thumb, wanted, version]);
 
   const box = large ? "aspect-[4/3] w-full rounded-t-[11px] bg-ink/4" : "h-9 w-9 rounded-lg bg-ink/5";
   return (
-    <span ref={ref} className={`relative flex shrink-0 items-center justify-center overflow-hidden ${box}`}>
+    <span className={`relative flex shrink-0 items-center justify-center overflow-hidden ${box}`}>
       {url ? (
         <>
           <img src={url} alt="" className="h-full w-full object-contain" draggable={false} />
@@ -56,12 +58,16 @@ function Thumb({ drive, entry, large = false }: { drive: string; entry: Entry; l
   );
 }
 
-const BADGES = { video: { Icon: Play, label: "Video" }, comic: { Icon: BookOpen, label: "Comic" } } as const;
+const BADGES = {
+  video: { Icon: Play, label: "Video" },
+  comic: { Icon: BookOpen, label: "Comic" },
+  audio: { Icon: Music, label: "Audio" },
+} as const;
 
-/** On a thumbnail, says it isn't simply a picture: a video, or a comic's cover. */
+/** On a thumbnail, says it isn't simply a picture: a video, or the cover of a comic or album. */
 function KindBadge({ entry, large }: { entry: Entry; large: boolean }) {
   const kind = previewKind(entry.name, entry.size);
-  if (kind !== "video" && kind !== "comic") return null;
+  if (kind !== "video" && kind !== "comic" && kind !== "audio") return null;
   const { Icon, label } = BADGES[kind];
   return (
     <span
@@ -119,8 +125,17 @@ function Opener({
   );
 }
 
+/** What the page asks of a listing, whose items may not all be drawn. */
+export type ListingHandle = {
+  /** Scrolls an item into view. */
+  reveal: (index: number) => void;
+  /** The item a row up or down from another; on the first or last row, the first or last item. */
+  rowAway: (dir: 1 | -1, from: number) => number;
+};
+
 /** What the list and the grid both need from the page. */
 export type ListingProps = {
+  handle: Ref<ListingHandle>;
   drive: string;
   entries: Entry[];
   selected: Set<string>;
@@ -155,10 +170,12 @@ const TYPE_COLUMN = "hidden w-40 shrink-0 truncate @4xl:block";
 const SIZE_COLUMN = "hidden w-20 shrink-0 text-right @xl:block";
 const ADDED_COLUMN = "hidden w-28 shrink-0 text-right @3xl:block";
 
-/** What the sticky bars above a list row take, for scrolling it into view. */
-const CLEAR_OF_BARS = "scroll-mb-24 scroll-mt-40";
+/** A list row's height, and the space above the first. */
+const ROW = 52;
+const LIST_TOP = 4;
 
 export function ListView({
+  handle,
   drive,
   entries,
   selected,
@@ -180,6 +197,17 @@ export function ListView({
 }) {
   const count = entries.reduce((n, e) => n + Number(selected.has(e.id)), 0);
   const all = count === entries.length;
+  const list = useRef<HTMLUListElement>(null);
+  const { from, to } = useVisibleRows(list, entries.length, ROW, LIST_TOP);
+
+  useImperativeHandle(
+    handle,
+    () => ({
+      reveal: (index) => list.current && scrollToRow(list.current, LIST_TOP + index * ROW, ROW),
+      rowAway: (dir, at) => Math.min(Math.max(at + dir, 0), entries.length - 1),
+    }),
+    [entries.length],
+  );
 
   /** A header that sorts by its column; clicking it again flips the direction. */
   function column(key: SortKey, label: string) {
@@ -217,8 +245,13 @@ export function ListView({
         <span className={ADDED_COLUMN}>{column("created", "Added")}</span>
         <span className="w-8 shrink-0 @2xl:w-[68px]" aria-hidden="true" />
       </div>
-      <ul className="-mx-2 pt-1">
-        {entries.map((entry, i) => {
+      <ul
+        ref={list}
+        className="-mx-2 [overflow-anchor:none]"
+        style={{ paddingTop: LIST_TOP + from * ROW, paddingBottom: (entries.length - to) * ROW }}
+      >
+        {entries.slice(from, to).map((entry, n) => {
+          const i = from + n;
           const place = locationOf(entry);
           const size = entry.kind === "file" ? formatSize(entry.size) : null;
           return (
@@ -226,7 +259,9 @@ export function ListView({
               key={entry.id}
               data-entry={entry.id}
               aria-current={cursor === entry.id || undefined}
-              className={`group relative flex h-[52px] select-none items-center gap-3 rounded-lg px-2 ${CLEAR_OF_BARS} ${selected.has(entry.id) ? "bg-accent/12" : "hover:bg-ink/4"} ${cursor === entry.id ? "outline-2 -outline-offset-2 outline-accent/70" : ""}`}
+              aria-setsize={entries.length}
+              aria-posinset={i + 1}
+              className={`group relative flex h-[52px] select-none items-center gap-3 rounded-lg px-2 ${selected.has(entry.id) ? "bg-accent/12" : "hover:bg-ink/4"} ${cursor === entry.id ? "outline-2 -outline-offset-2 outline-accent/70" : ""}`}
             >
               <span className="relative z-[1] flex">
                 <SelectBox entry={entry} checked={selected.has(entry.id)} onToggle={(range) => onToggle(i, range)} />
@@ -294,27 +329,117 @@ export function ListView({
 const GRID =
   "grid grid-cols-[repeat(auto-fill,minmax(8.75rem,1fr))] gap-3 @3xl:grid-cols-[repeat(auto-fill,minmax(12.5rem,1fr))]";
 
+/** How a grid is laid out now: its columns, how tall a tile is (they all are the
+ * same), and from the top of one row to the top of the next. */
+function gridShape(grid: HTMLElement): { columns: number; height: number; stride: number } {
+  const style = getComputedStyle(grid);
+  const height = grid.firstElementChild?.getBoundingClientRect().height ?? 0;
+  return {
+    columns: style.gridTemplateColumns.split(" ").length,
+    height,
+    stride: height && height + parseFloat(style.rowGap),
+  };
+}
+
+/** A grid of which only the rows in or near view are drawn. */
+function Grid({
+  grid,
+  count,
+  children,
+}: {
+  grid: RefObject<HTMLUListElement | null>;
+  count: number;
+  children: (from: number, to: number) => ReactNode;
+}) {
+  const [{ columns, stride }, setShape] = useState({ columns: 6, stride: 0 });
+
+  useLayoutEffect(() => {
+    const el = grid.current;
+    if (!el) return;
+    const measure = () => {
+      const next = gridShape(el);
+      setShape((old) => (old.columns === next.columns && old.stride === next.stride ? old : next));
+    };
+    measure();
+    // The columns follow the width, and the tiles' height follows theirs.
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [grid]);
+
+  const rows = Math.ceil(count / columns);
+  const { from, to } = useVisibleRows(grid, rows, stride);
+  return (
+    <ul
+      ref={grid}
+      className={`${GRID} [overflow-anchor:none]`}
+      style={{ paddingTop: from * stride, paddingBottom: (rows - to) * stride }}
+    >
+      {children(from * columns, Math.min(to * columns, count))}
+    </ul>
+  );
+}
+
 /** Leading folders are small tiles, a name each; everything after them gets a picture. */
 export function GridView(props: ListingProps) {
-  const { entries, selected } = props;
+  const { handle, entries, selected } = props;
   const firstOther = entries.findIndex((e) => e.kind !== "dir");
   const folders = firstOther < 0 ? entries.length : firstOther;
   const selecting = entries.some((e) => selected.has(e.id));
+  const folderGrid = useRef<HTMLUListElement>(null);
+  const fileGrid = useRef<HTMLUListElement>(null);
+
+  useImperativeHandle(handle, () => {
+    /** The grid an item is in, and which of the items are in it (`end` excluded). */
+    const gridOf = (index: number) =>
+      index < folders
+        ? { el: folderGrid.current, start: 0, end: folders }
+        : { el: fileGrid.current, start: folders, end: entries.length };
+    return {
+      reveal(index) {
+        const { el, start } = gridOf(index);
+        if (!el) return;
+        const { columns, height, stride } = gridShape(el);
+        scrollToRow(el, Math.floor((index - start) / columns) * stride, height);
+      },
+      rowAway(dir, at) {
+        const { el, start, end } = gridOf(at);
+        if (!el) return at;
+        const { columns } = gridShape(el);
+        const column = (at - start) % columns;
+        // The row's first item. Both grids have the same columns, so a column carries over.
+        const row = at - column + dir * columns;
+        if (row >= start && row < end) return Math.min(row + column, end - 1);
+        if (dir > 0) return end < entries.length ? Math.min(end + column, entries.length - 1) : entries.length - 1;
+        if (start === 0) return 0;
+        return Math.min(Math.floor((start - 1) / columns) * columns + column, start - 1);
+      },
+    };
+  }, [folders, entries.length]);
+
   return (
     <div className="space-y-5 pt-3">
       {folders > 0 && (
-        <ul className={GRID}>
-          {entries.slice(0, folders).map((entry, i) => (
-            <FolderTile key={entry.id} {...props} entry={entry} index={i} selecting={selecting} />
-          ))}
-        </ul>
+        <Grid key="folders" grid={folderGrid} count={folders}>
+          {(from, to) =>
+            entries
+              .slice(from, to)
+              .map((entry, n) => (
+                <FolderTile key={entry.id} {...props} entry={entry} index={from + n} selecting={selecting} />
+              ))
+          }
+        </Grid>
       )}
       {folders < entries.length && (
-        <ul className={GRID}>
-          {entries.slice(folders).map((entry, i) => (
-            <Tile key={entry.id} {...props} entry={entry} index={folders + i} selecting={selecting} />
-          ))}
-        </ul>
+        <Grid key="files" grid={fileGrid} count={entries.length - folders}>
+          {(from, to) =>
+            entries
+              .slice(folders + from, folders + to)
+              .map((entry, n) => (
+                <Tile key={entry.id} {...props} entry={entry} index={folders + from + n} selecting={selecting} />
+              ))
+          }
+        </Grid>
       )}
     </div>
   );
@@ -323,15 +448,17 @@ export function GridView(props: ListingProps) {
 type TileProps = ListingProps & { entry: Entry; index: number; selecting: boolean };
 
 const tile = (selected: boolean, cursor: boolean) =>
-  `group relative select-none rounded-xl border transition-colors ${CLEAR_OF_BARS} ${selected ? "border-accent bg-accent/12 ring-1 ring-accent" : "border-line bg-surface hover:border-ink/30"} ${cursor ? "outline-2 outline-offset-2 outline-accent/70" : ""}`;
+  `group relative select-none rounded-xl border transition-colors ${selected ? "border-accent bg-accent/12 ring-1 ring-accent" : "border-line bg-surface hover:border-ink/30"} ${cursor ? "outline-2 outline-offset-2 outline-accent/70" : ""}`;
 
-function FolderTile({ drive, entry, index, selecting, selected, cursor, claimClick, onToggle, onPreview, locationOf, menu }: TileProps) {
+function FolderTile({ drive, entries, entry, index, selecting, selected, cursor, claimClick, onToggle, onPreview, locationOf, menu }: TileProps) {
   const isSelected = selected.has(entry.id);
   const place = locationOf(entry);
   return (
     <li
       data-entry={entry.id}
       aria-current={cursor === entry.id || undefined}
+      aria-setsize={entries.length}
+      aria-posinset={index + 1}
       className={`${tile(isSelected, cursor === entry.id)} flex h-14 items-center pr-1.5`}
     >
       <Opener
@@ -362,12 +489,14 @@ function FolderTile({ drive, entry, index, selecting, selected, cursor, claimCli
   );
 }
 
-function Tile({ drive, entry, index, selecting, selected, cursor, claimClick, onToggle, onPreview, locationOf, menu }: TileProps) {
+function Tile({ drive, entries, entry, index, selecting, selected, cursor, claimClick, onToggle, onPreview, locationOf, menu }: TileProps) {
   const isSelected = selected.has(entry.id);
   return (
     <li
       data-entry={entry.id}
       aria-current={cursor === entry.id || undefined}
+      aria-setsize={entries.length}
+      aria-posinset={index + 1}
       className={tile(isSelected, cursor === entry.id)}
     >
       <Opener

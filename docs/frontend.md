@@ -58,6 +58,10 @@ invalidation refreshes everything affected:
 | `["zipPage", drive, id, path]` | One decompressed image from a comic or zip | Garbage-collected 30 s after it leaves the screen |
 | `["zipStart", drive, id, path]` | Where a stored video's data starts in its zip | Never refetched |
 
+Uploads and **Make thumbnails** change one file after another, so they refresh
+the listings through `refreshSoon()` (`refresh.ts`): at once, then at most
+every 1.5 s, rather than fetching a long folder again for each file.
+
 Queries do not retry 4xx answers (a locked drive won't unlock itself) and
 are fresh for 5 s.
 
@@ -236,8 +240,9 @@ the tab is closed. Failed jobs are kept so **Retry** resumes from where they sto
 **Loading.** `loadThumbnail(drive, id)` fetches
 `/files/{id}/thumbnail`, turns it into an object URL, and caches it in a
 `Map` for this tab only (the server sends `no-store`, so decrypted
-thumbnails never reach the disk cache). At most 3 requests run at once,
-leaving browser connections free for navigation. A 404 is remembered as
+thumbnails never reach the disk cache). `slot()` limits how many run at
+once, to leave browser connections free for navigation: 3 to show
+thumbnails, 3 to make them, 5 in all, showing first. A 404 is remembered as
 "no thumbnail"; other failures are retried later. `forgetThumbnails(drive?)`
 revokes the URLs.
 
@@ -253,7 +258,8 @@ demand).
 frame at `frameTime()` (a tenth of the way in, at least 3 s and at most
 3 min, never past halfway), or a comic's (.cbz) first page in name order,
 read from the zip's index with `zip.ts` (which takes a local `Blob` as
-well as a URL), onto a canvas scaled to 320 px and `PUT`s it
+well as a URL), or audio's cover art, read from its tags with
+`player/cover.ts` (Mediabunny: MP3, FLAC, M4A, Ogg, WAV), onto a canvas scaled to 320 px and `PUT`s it
 as WebP (PNG where WebP encoding is unsupported). The server re-encodes
 whatever it receives. This means Telegram is never asked for a file just to
 thumbnail it.
@@ -268,16 +274,20 @@ image up to 50 MB on the server, so the browser downloads nothing. `useThumbnail
 lets anything showing the old one load the new one.
 
 **Make thumbnails** under a folder's name (with how many it lacks) runs `makeThumbnail()` on each image,
-video and comic there without one, one at a time. Images the server can thumbnail
-(up to 50 MB) are left to it, so the browser doesn't download them; others,
-videos and comics are drawn from the server's copy, a video read only as far as its
-frame (`preload="metadata"`), a comic only its index and first page. An `AbortController` stops it when the folder,
+video, comic and audio file there without one, `MAKE_PARALLEL` (3) at a time. Images the server can thumbnail
+(up to 50 MB) are left to it, so the browser doesn't download them; larger
+ones, videos, comics and audio are drawn from the server's copy, a video read only as far as its
+frame (`preload="metadata"`), a comic only its index and first page (which the server fetches together:
+`api.fileUrlAhead`), audio only its tags. Audio found to have no cover art is
+remembered for as long as the tab is open (`hasNoCover()`) and not looked at again. An `AbortController` stops it when the folder,
 drive or search changes; closing the tab stops it anyway. Files whose
 thumbnail is cached on the server count as having one, and the server sends
 those to Telegram itself.
 
-In the listing, thumbnails are fitted inside their box (`object-contain`),
-and a video's or comic's carries a small badge (`KindBadge`) so it isn't
+In the listing, a thumbnail is asked for once its row has been drawn for
+100 ms, so scrolling fast through a long folder doesn't queue up all it
+passes. Thumbnails are fitted inside their box (`object-contain`),
+and a video's, comic's or audio file's carries a small badge (`KindBadge`) so it isn't
 mistaken for a picture.
 
 The same decode yields the file's details (dimensions, length, EXIF date
@@ -324,7 +334,12 @@ The file browser for one drive and folder.
 - **Listing**: `["nodes", drive, parent]`, as a list or grid (remembered in
   `localStorage`), drawn by `components/listing.tsx`. A whole row opens its
   item. In the grid, folders at the front are small tiles and the rest get a
-  thumbnail.
+  thumbnail. Only the rows in or near view are drawn (`useVisibleRows` in
+  `components/rows.ts`), with padding in place of the others, so a folder of
+  thousands stays quick. Anything that needs an item's place on the page asks
+  the listing for it (`ListingHandle`) rather than the DOM, where it may not
+  be. The browser's own find in page sees only what is drawn; search finds
+  the rest.
 - **Bars** (`components/browserBars.tsx`): the top bar has breadcrumbs, search,
   the details toggle and the drive's menu. Upload files, Upload folder and New
   folder are cards at the top of the folder; once those scroll out of
@@ -355,7 +370,7 @@ The file browser for one drive and folder.
   selection** and, for one item, **Advanced rename**.
 - **Keyboard**: a highlight (`cursor`, an entry id, outlined) is separate
   from the selection. Arrows move it (Up/Down by a whole row in the grid, to
-  the nearest item by where they are on screen: `rowAway`), as do Home/End and
+  keeping to the column: `rowAway`), as do Home/End and
   PageUp/PageDown; Shift extends the selection from the anchor. Enter opens
   the highlighted item (`openEntry`: folder, preview or download), Space
   selects it, Backspace or Alt+↑ goes up a folder, and typing letters jumps

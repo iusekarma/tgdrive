@@ -679,10 +679,13 @@ async def download_file(node_id: str, request: Request, inline: bool = False,
                         offset: Annotated[int | None, Query(ge=0)] = None,
                         length: Annotated[int | None, Query(ge=0)] = None,
                         filename: Annotated[str | None, Query(min_length=1, max_length=1024)] = None,
+                        ahead: Annotated[int | None, Query(ge=0)] = None,
                         drive: Drive = Depends(unlocked_drive), store: Storage = Depends(get_store)):
     """`offset`, `length` and `filename` serve part of the file as a file of its
     own (a file stored uncompressed inside a zip), ranges and all, so a video
-    in an archive can be played and seeked without unpacking it."""
+    in an archive can be played and seeked without unpacking it. `ahead` is
+    where in the file the client will read next: its chunk is fetched
+    alongside, so the two downloads from Telegram overlap."""
     entry = store.stat(drive, node_id)
     if entry.kind != "file":
         raise HTTPException(400, "not a file")
@@ -697,6 +700,8 @@ async def download_file(node_id: str, request: Request, inline: bool = False,
     except RangeNotSatisfiable:
         return Response(status_code=416, headers={"Content-Range": f"bytes */{size}"})
     start, end = rng or (0, size)
+    if ahead is not None:
+        store.fetch_ahead(drive, node_id, ahead)
 
     media = mimetypes.guess_type(shown_name)[0] or "application/octet-stream"
     show = inline and (media in INLINE_TYPES or media.startswith(("video/", "audio/")))

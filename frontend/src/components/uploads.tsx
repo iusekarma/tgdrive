@@ -5,6 +5,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { api, ApiError, sendUpload, type Entry, type QueuedUpload, type UploadStatus, type UploadWait } from "../api";
 import { formatDuration, formatSize } from "../format";
 import { infoKey } from "../fileinfo";
+import { refreshSoon } from "../refresh";
 import { useSavedFlag } from "../saved";
 import { sendDetails } from "../thumbs";
 import { Button, Dialog, DialogActions, ICON_BUTTON } from "./ui";
@@ -480,7 +481,7 @@ export function UploadsProvider({ children }: { children: ReactNode }) {
     run(job, stop.signal)
       .then(
         (entry) => {
-          void queryClient.invalidateQueries({ queryKey: ["nodes", batch.drive] });
+          refreshSoon(queryClient, batch.drive);
           if (!entry || !file) {
             setItems((list) => list.filter((item) => item.id !== id)); // an empty folder that needed a retry
             return;
@@ -494,7 +495,7 @@ export function UploadsProvider({ children }: { children: ReactNode }) {
           });
           // Made from the local copy, alongside the next upload rather than before it.
           void sendDetails(batch.drive, entry.id, file).then(({ thumb, info }) => {
-            if (thumb) void queryClient.invalidateQueries({ queryKey: ["nodes", batch.drive] });
+            if (thumb) refreshSoon(queryClient, batch.drive);
             if (info) queryClient.setQueryData(infoKey(batch.drive, entry.id), info);
           });
         },

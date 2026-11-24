@@ -8,8 +8,12 @@ import { comicPages, listZip, pageType, readZipEntry, type ZipSource } from "./z
 /** Matches the server: larger images are not fetched from Telegram just to thumbnail them. */
 const SERVER_SOURCE_MAX = 50 * 1024 * 1024;
 const SIZE = 320;
-/** Thumbnails that are still being made hold a connection; keep most of the browser's six free. */
-const PARALLEL = 3;
+/** Thumbnails that are still being made hold a connection, and the browser has
+ * six. At most this many for showing and for making them, and in all. */
+const PARALLEL = { show: 3, make: 3 };
+const PARALLEL_ALL = 5;
+/** How many files makeThumbnail() can usefully work on at once. */
+export const MAKE_PARALLEL = PARALLEL.make;
 
 /** Whether asking the server for a thumbnail can succeed. */
 export function hasThumbnail(entry: Entry): boolean {
@@ -26,19 +30,35 @@ const pending = new Map<string, Promise<string | null>>();
 // Thumbnails this tab is making from a just-uploaded file. Asking the server
 // meanwhile would have it fetch the whole file back from Telegram to make one.
 const making = new Map<string, Promise<void>>();
-let active = 0;
-const waiting: (() => void)[] = [];
+// Audio files found to have no cover art, so they aren't fetched again to look.
+const coverless = new Set<string>();
+
+type Lane = keyof typeof PARALLEL;
+const active: Record<Lane, number> = { show: 0, make: 0 };
+const waiting: Record<Lane, (() => void)[]> = { show: [], make: [] };
 
 const key = (drive: string, id: string) => `${drive}\n${id}`;
 
-async function slot<T>(work: () => Promise<T>): Promise<T> {
-  if (active >= PARALLEL) await new Promise<void>((resolve) => waiting.push(resolve));
-  active += 1;
+/** Lets in whoever there is room for; showing goes before making. */
+function admit() {
+  for (const lane of ["show", "make"] as const) {
+    while (waiting[lane].length && active[lane] < PARALLEL[lane] && active.show + active.make < PARALLEL_ALL) {
+      active[lane] += 1;
+      waiting[lane].shift()?.();
+    }
+  }
+}
+
+async function slot<T>(lane: Lane, work: () => Promise<T>): Promise<T> {
+  await new Promise<void>((resolve) => {
+    waiting[lane].push(resolve);
+    admit();
+  });
   try {
     return await work();
   } finally {
-    active -= 1;
-    waiting.shift()?.();
+    active[lane] -= 1;
+    admit();
   }
 }
 
@@ -67,13 +87,13 @@ export function useThumbnailVersion(drive: string, id: string): number {
 }
 
 /** Resolves to an object URL, or null when there is no thumbnail. */
-export async function loadThumbnail(drive: string, id: string): Promise<string | null> {
+export async function loadThumbnail(drive: string, id: string, lane: Lane = "show"): Promise<string | null> {
   const k = key(drive, id);
   await making.get(k);
   if (cache.has(k)) return Promise.resolve(cache.get(k) ?? null);
   let job = pending.get(k);
   if (!job) {
-    job = slot(async () => {
+    job = slot(lane, async () => {
       const res = await fetch(api.thumbnailUrl(drive, id));
       if (res.ok) return URL.createObjectURL(await res.blob());
       return res.status === 404 ? null : undefined;
@@ -138,12 +158,29 @@ async function fromImage(file: Blob): Promise<Look> {
   }
 }
 
-/** A comic's cover: its first page, read from the zip without fetching the rest. */
-async function fromComic(source: ZipSource, size: number, signal?: AbortSignal): Promise<Blob | null> {
-  const [first] = comicPages(await listZip(source, size, signal));
+/** A comic's cover: its first page, read from the zip without fetching the
+ * rest. `index` is where to read the zip's index, if not from `source`. */
+async function fromComic(
+  source: ZipSource,
+  size: number,
+  signal?: AbortSignal,
+  index: ZipSource = source,
+): Promise<Blob | null> {
+  const [first] = comicPages(await listZip(index, size, signal));
   if (!first) return null;
   const page = await readZipEntry(source, size, first, pageType(first.path), signal);
   return (await fromImage(page)).image;
+}
+
+/** The cover art inside an audio file (album art), or null if it has none that can be drawn. */
+async function fromCover(source: Blob | string, size: number, signal?: AbortSignal): Promise<Blob | null> {
+  // Mediabunny is large, and only needed here and by the player.
+  const { coverArt } = await import("./player/cover");
+  for (const picture of await coverArt(source, size, signal)) {
+    const image = await fromImage(picture).then((look) => look.image, () => null);
+    if (image) return image;
+  }
+  return null;
 }
 
 /** Draws the frame the video element is showing. */
@@ -211,7 +248,7 @@ const fromVideo = (source: Blob | string, signal?: AbortSignal) =>
       );
   }, signal);
 
-const fromAudio = (file: Blob) =>
+const audioInfo = (file: Blob) =>
   fromMedia(file, "audio", (audio, done, info) => {
     audio.onloadedmetadata = () => {
       info.duration = seconds(audio.duration);
@@ -219,8 +256,20 @@ const fromAudio = (file: Blob) =>
     };
   });
 
+/** Audio from a local copy: its length, and its cover art if it has any. */
+async function fromAudio(file: Blob): Promise<Look & { coverless: boolean }> {
+  const [{ info }, cover] = await Promise.all([
+    audioInfo(file),
+    fromCover(file, file.size).catch(() => undefined),
+  ]);
+  return { image: cover ?? null, info, coverless: cover === null };
+}
+
+/** Whether the file was looked at and has nothing to make a thumbnail from. */
+export const hasNoCover = (drive: string, id: string) => coverless.has(key(drive, id));
+
 /** Made from the local copy right after an upload, so Telegram is never asked
- * for the file: a thumbnail for images and videos, and details (dimensions,
+ * for the file: a thumbnail for images, videos, comics and audio with cover art, and details (dimensions,
  * duration, when it was taken) for anything. Best effort: formats the browser
  * can't decode get neither. Returns the details as the server now has them. */
 export async function sendDetails(
@@ -238,7 +287,11 @@ export async function sendDetails(
     try {
       if (kind === "image") look = await fromImage(file);
       else if (kind === "video") look = await fromVideo(file);
-      else if (kind === "audio") look = await fromAudio(file);
+      else if (kind === "audio") {
+        const audio = await fromAudio(file);
+        if (audio.coverless) coverless.add(k);
+        look = audio;
+      }
       else if (kind === "comic") look = { image: await fromComic(file, file.size), info: {} };
     } catch {
       // Not decodable here; the file's own date is still worth keeping.
@@ -294,7 +347,7 @@ export function sendVideoFrame(drive: string, id: string): Promise<boolean> {
 
 /** Throws the file's thumbnail away and makes a new one, as makeThumbnail()
  * does: images up to 50 MB on the server, which fetches the file itself, so
- * the browser downloads nothing; videos, comics and larger images here. Resolves to
+ * the browser downloads nothing; anything else here. Resolves to
  * whether there is one now. */
 export async function regenerateThumbnail(drive: string, entry: Entry): Promise<boolean> {
   const k = key(drive, entry.id);
@@ -312,25 +365,37 @@ export async function regenerateThumbnail(drive: string, entry: Entry): Promise<
 }
 
 /** For a file that has no thumbnail: images the server can thumbnail are left
- * to it, so the browser doesn't download them; larger ones, videos and comics
- * are drawn here from the server's copy (a video only as far as the frame, a
- * comic only its index and first page).
- * Resolves to whether there is one now. Stops early when `signal` aborts. */
+ * to it, so the browser doesn't download them; larger ones, videos, comics and
+ * audio are drawn here from the server's copy (a video only as far as the
+ * frame, a comic only its index and first page, audio only its tags).
+ * Resolves to whether there is one now; if not, hasNoCover() says whether that
+ * is because the file has none. Stops early when `signal` aborts. */
 export async function makeThumbnail(drive: string, entry: Entry, signal: AbortSignal): Promise<boolean> {
   const kind = previewKind(entry.name, entry.size);
-  if (kind === "image" && entry.size <= SERVER_SOURCE_MAX) return (await loadThumbnail(drive, entry.id)) !== null;
-  let image: Blob | null = null;
-  try {
-    if (kind === "image") {
-      const res = await fetch(api.fileUrl(drive, entry.id, true), { signal });
-      if (res.ok) image = (await fromImage(await res.blob())).image;
-    } else if (kind === "video") {
-      image = (await fromVideo(api.fileUrl(drive, entry.id, true), signal)).image;
-    } else if (kind === "comic") {
-      image = await fromComic(api.fileUrl(drive, entry.id), entry.size, signal);
-    }
-  } catch {
-    return false;   // not decodable here, or stopped
+  if (kind === "image" && entry.size <= SERVER_SOURCE_MAX) {
+    return (await loadThumbnail(drive, entry.id, "make")) !== null;
   }
-  return !signal.aborted && send(drive, entry.id, image);
+  return slot("make", async () => {
+    if (signal.aborted) return false;
+    let image: Blob | null = null;
+    try {
+      const url = api.fileUrl(drive, entry.id);
+      const inline = api.fileUrl(drive, entry.id, true);
+      if (kind === "image") {
+        const res = await fetch(inline, { signal });
+        if (res.ok) image = (await fromImage(await res.blob())).image;
+      } else if (kind === "video") {
+        image = (await fromVideo(inline, signal)).image;
+      } else if (kind === "comic") {
+        // The index is at the end and the first page usually at the start: have the server fetch both at once.
+        image = await fromComic(url, entry.size, signal, api.fileUrlAhead(drive, entry.id, 0));
+      } else if (kind === "audio") {
+        image = await fromCover(url, entry.size, signal);
+        if (!image) coverless.add(key(drive, entry.id));
+      }
+    } catch {
+      return false;   // not decodable here, or stopped
+    }
+    return !signal.aborted && send(drive, entry.id, image);
+  });
 }

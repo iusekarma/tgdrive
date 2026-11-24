@@ -8,7 +8,7 @@ preview and search them, all behind one master password. Each drive can also
 have a password of its own.
 
 - End-to-end encrypted: Telegram only ever sees encrypted chunks
-- Web UI with folders (upload whole folders), uploads that resume after a dropped connection, search, image and video thumbnails, a full-window viewer (images, video including MPEG-TS, with a choice of audio and subtitle tracks, audio, PDF, text, zip contents, CBZ comics read a page at a time), range downloads (video seeking), and folders or several files downloaded as one zip
+- Web UI with folders (upload whole folders), uploads that resume after a dropped connection, search, thumbnails for images, videos, comics and audio (cover art), a full-window viewer (images, video including MPEG-TS, with a choice of audio and subtitle tracks, audio, PDF, text, zip contents, CBZ comics read a page at a time), range downloads (video seeking), and folders or several files downloaded as one zip
 - Several drives, each optionally protected by its own password
 - Mount any drive as a network drive over WebDAV (Windows, macOS, Linux, rclone)
 - Recovery keys for every password
@@ -334,7 +334,7 @@ All settings go in `backend/.env` (see [backend/.env.example](backend/.env.examp
 | `TGDRIVE_COOKIE_SECURE` | `false` | Set to `true` when serving over HTTPS |
 | `TGDRIVE_SESSION_IDLE_MINUTES` | `30` | Idle time before a session's drives lock |
 | `TGDRIVE_THUMB_CACHE_MB` | `512` | Size limit of the local thumbnail cache; `0` for no limit. Thumbnails are also kept in the channel, so evicted ones come back |
-| `TGDRIVE_CHUNK_CACHE_MB` | `64` | Recently read chunks kept in memory, still encrypted, so many small range reads of one chunk fetch it from Telegram once; `0` turns it off |
+| `TGDRIVE_CHUNK_CACHE_MB` | `128` | Recently read chunks kept in memory, still encrypted, so many small range reads of one chunk fetch it from Telegram once; `0` turns it off. Less than 128 can make **Make thumbnails** fetch some chunks twice |
 | `TGDRIVE_BACKUP_DEBOUNCE_SECONDS` | `30` | Delay between a change and its backup |
 | `TGDRIVE_CHUNK_SIZE` | `16777216` | Chunk size in bytes (16 MB) |
 | `TGDRIVE_PACK_SMALL_FILES` | `true` | Small files share Telegram messages, so many of them upload far faster under Telegram's limit of about 20 messages a minute. `false` sends one message per file |
@@ -391,13 +391,14 @@ upload is discarded after an hour without progress, or when the server
 restarts. If some of the files you pick are already in the folder (same name
 and size), it asks whether to skip them and upload the rest.
 
-**Thumbnails.** Your browser makes thumbnails of images and videos right
-after uploading them; a video's is a frame a tenth of the way in (at least
-3 seconds, at most 3 minutes). A file opened in the viewer without one gets
-one then, and images uploaded other ways get one made on the server when
+**Thumbnails.** Your browser makes thumbnails of images, videos, comics and
+audio right after uploading them; a video's is a frame a tenth of the way in
+(at least 3 seconds, at most 3 minutes), a comic's is its first page, and
+audio's is the cover art in its tags, if it has any. An image or video opened
+in the viewer without one gets one then, and images uploaded other ways get one made on the server when
 first shown (up to 50 MB). **Regenerate thumbnail** in a file's menu makes a
-new one, and **Make thumbnails** in a folder makes them, one by one, for the
-images and videos there that have none (it stops when you leave the folder). Thumbnails are encrypted with their file's key and kept in the
+new one, and **Make thumbnails** in a folder makes them, three at a time, for the
+images, videos, comics and audio there that have none (it stops when you leave the folder). Thumbnails are encrypted with their file's key and kept in the
 channel, a few hundred to a message so they cost almost nothing against
 Telegram's rate limits, and cached on the server.
 
@@ -444,7 +445,7 @@ Interactive docs are served at **http://localhost:8000/api/docs**.
 | GET · DELETE | `/api/drives/{name}/uploads/{id}` | How much is stored and what the server is doing / cancel |
 | POST | `/api/uploads/sync` | The upload line every device shares: report this tab's uploads, get everyone's |
 | POST | `/api/uploads/leave` | A closing tab leaves the upload line |
-| GET | `/api/drives/{name}/files/{id}` | Download; supports `Range` and `?inline=true`, and `offset`, `length`, `filename` to serve part of the file as a file of its own |
+| GET | `/api/drives/{name}/files/{id}` | Download; supports `Range` and `?inline=true`, `offset`, `length`, `filename` to serve part of the file as a file of its own, and `ahead` to start fetching the chunk holding that byte as well |
 | POST | `/api/drives/{name}/zips` | Start a zip of `ids` (folders included); answers with the `url` to fetch it from |
 | GET | `/api/drives/{name}/zips/{id}` | The zip, streamed as it is built (stored, not compressed; length known up front) |
 | GET · PUT · DELETE | `/api/drives/{name}/files/{id}/thumbnail` | Get, upload, or forget (to make a new one) a 320px WebP thumbnail |
