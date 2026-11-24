@@ -9,6 +9,7 @@ Source in [frontend/src](../frontend/src).
 | `react-router-dom` | Routes `/`, `/d/:drive`, `/d/:drive/:folderId` |
 | `lucide-react` | Icons |
 | `@fontsource-variable/geist` | The UI font, bundled (the CSP allows no third-party origins) |
+| `mediabunny` (with `@mediabunny/ac3`, `dts`, `truehd`) | Takes MKV, WebM, MP4 and MOV apart for the video player; loaded when a video is opened, each decoder only when a track needs it |
 | `mpegts.js` | Plays `.ts`/`.m2ts` video through Media Source; loaded only when one is opened |
 
 The browser never holds a key. It sends passwords to the server, gets a
@@ -163,6 +164,14 @@ file or empty folder. All jobs from one drop share a `Batch`, whose
 `folders` map caches the id of each folder created, so a 1,000-file drop
 creates each folder once (`createFolder(..., exist_ok=true)`).
 
+**Already uploaded.** First, `alreadyThere()` lists the folders the files
+would go in (only those that exist) and finds the files already there with
+the same name and size; files this tab already has queued for the same place
+count too. If there are any, `SkipDialog` asks whether to skip them and
+upload the rest, rather than letting the server refuse each one. A file of
+the same name but another size isn't the same file: it is sent, and fails
+with "already exists". If the check itself fails, everything is queued.
+
 **One file at a time, across devices.** Telegram rate-limits bots per chat,
 so parallel uploads would trade speed for retries. Every tab reports its
 rows to the server's shared upload line (`POST /uploads/sync`, see
@@ -214,7 +223,9 @@ starts.
 
 The chevron in the panel's header folds the list away, leaving the header
 with the overall progress (even for one file) and a count of failed or
-unfinished rows; the choice is remembered in `localStorage`.
+unfinished rows; the choice is remembered in `localStorage`. Failed rows sit
+below the list in a section of their own (`Failures`), folded down to a count
+until opened, so the upload in progress stays in view.
 
 While this tab is sending anything, a `beforeunload` handler asks before
 the tab is closed. Failed jobs are kept so **Retry** resumes from where they stopped;
@@ -447,18 +458,20 @@ of the listing (or search results) it was opened from.
   `EntryDetails`, remembered in `localStorage`), Download, Close (Esc).
 - **Stepping**: ← / → buttons and keys, and a horizontal swipe on touch
   screens for images, audio, comics and zips. Keys are left alone while a
-  media element has focus, so its own seeking keys still work.
-- **Controls fade** (`useIdle`): the ← / → buttons and a reader's page bar
-  fade out 2.5 s after the pointer last moved, and come back when it moves
-  or is tapped. They stay while the pointer rests on one (anything marked
-  `data-control`) or one has keyboard focus.
+  media element has focus, so its own seeking keys still work. The video
+  player takes the arrows too; Shift+← / → steps past it.
+- **Full size**: what is shown takes all of the window but the header, scaled
+  up if it is smaller.
+- **Controls fade** (`useIdle`): a reader's page bar and the player's controls
+  fade out 2.5 s after the pointer last moved, and come back when it moves or
+  is tapped. They stay while the pointer rests on one (anything marked
+  `data-control`) or one has keyboard focus. The ← / → buttons appear only
+  while the mouse is over them; without a mouse, or in a narrow window, they
+  fade like the rest (the `mouse:` variant in `index.css`).
 - **What it shows**: images, video, audio and PDF (iframe) through
-  `?inline=true`, which the server honours only for safe types. The
-  `<video>` fills the stage from the start, so nothing jumps once its size
-  is known. Text fetches
-  the first 512 KB with a `Range` request. MPEG-TS video (`.ts`, `.m2ts`,
-  `.mts`) is repackaged in the browser by mpegts.js, which reads the file
-  with range requests. Files the browser can't decode say so and offer the
+  `?inline=true`, which the server honours only for safe types. Video has
+  its own player ([below](#componentsplayertsx-and-player)). Text fetches
+  the first 512 KB with a `Range` request. Files the browser can't decode say so and offer the
   download.
 - **Zips** (`zip`, `jar`, `apk`): `listZip()` in `zip.ts` reads the
   last 64 KiB (the end record and usually the whole central directory), and
@@ -490,6 +503,54 @@ of the listing (or search results) it was opened from.
   the server serves as a file of its own, ranges and all, so it streams and
   seeks. A deflated entry is unpacked whole into a blob first, with
   progress; past 256 MB, or while scrolling, only when asked.
+
+## components/player.tsx and player/
+
+`VideoPlayer` draws its own controls: a seek bar that shows what is in
+memory, how many seconds are buffered, volume, subtitles, audio track, speed,
+picture in picture and full screen. Keys while it has focus: Space or `k`,
+← / → (5 s), `j` / `l` (10 s), ↑ / ↓ (volume), `m`, `c` (next subtitle), `f`,
+Home, End. Dragging the seek bar seeks once, where it is let go. Volume and the
+language last chosen for sound and for subtitles are kept in `localStorage`.
+
+There are three ways a video reaches the `<video>` element:
+
+| Way | For | Read-ahead limited by |
+|---|---|---|
+| Engine | MP4, MOV, MKV, WebM whose video codec Media Source takes | `engine.ts` |
+| mpegts.js | `.ts`, `.m2ts`, `.mts` | Its `lazyLoad` options: 60 s |
+| `<video src>` | Whatever those can't play | The browser |
+
+When one fails as unplayable, the last is tried from the same place. A network
+failure isn't that: it shows "Try again".
+
+**engine.ts.** Browsers play only a file's first audio track and decide
+themselves how much to read ahead. So the file is taken apart with Mediabunny
+and the chosen tracks are appended to Media Source buffers, one `Feed` each.
+Reading ahead stops at 60 s or 64 MB, whichever comes first (but not under
+10 s), and at 1 s before playback is first asked for. About 20 s behind the
+playhead is kept, cut at a keyframe. A browser whose quota is smaller gets less.
+Changing the audio track restarts only the audio feed, then seeks to the same
+place: otherwise Chrome joins the new track onto decoded frames of the old one,
+up to 85 ms out.
+
+**bytes.ts.** Range requests in 1 MB blocks, growing to 16 MB when reading on
+(one Telegram chunk), keeping the last 48 MB. Seeking drops requests
+nobody is waiting for. Failures are retried three times.
+
+**fmp4.ts** writes the fragments; Mediabunny makes the header. Its own
+fragments run from keyframe to keyframe, which can be ten seconds.
+
+**Audio the browser can't play** (AC-3, E-AC-3, DTS, TrueHD, PCM, ...) is
+decoded with WebAssembly, mixed down to stereo, and passed on as FLAC
+(`flac.ts`). WebCodecs could encode Opus, but exists only over HTTPS.
+
+**Subtitles** are drawn over the picture from cues: SubRip, WebVTT, ASS/SSA
+(line breaks, bold, italic, alignment and position; no colours, fonts or
+karaoke) and MP4 timed text. `mkv.ts` and `mp4.ts` read embedded tracks from
+the stretch of file just fetched for the picture, so nothing more is
+downloaded. Files next to the video (`Film.srt`, `Film.en.srt`) are offered
+too. Picture subtitles (PGS, VobSub) are listed but can't be shown.
 
 ## components/ui.tsx and LockDial.tsx
 

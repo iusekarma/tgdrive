@@ -8,7 +8,7 @@ preview and search them, all behind one master password. Each drive can also
 have a password of its own.
 
 - End-to-end encrypted: Telegram only ever sees encrypted chunks
-- Web UI with folders (upload whole folders), uploads that resume after a dropped connection, search, image and video thumbnails, a full-window viewer (images, video including MPEG-TS, audio, PDF, text, zip contents, CBZ comics read a page at a time), range downloads (video seeking), and folders or several files downloaded as one zip
+- Web UI with folders (upload whole folders), uploads that resume after a dropped connection, search, image and video thumbnails, a full-window viewer (images, video including MPEG-TS, with a choice of audio and subtitle tracks, audio, PDF, text, zip contents, CBZ comics read a page at a time), range downloads (video seeking), and folders or several files downloaded as one zip
 - Several drives, each optionally protected by its own password
 - Mount any drive as a network drive over WebDAV (Windows, macOS, Linux, rclone)
 - Recovery keys for every password
@@ -388,7 +388,8 @@ rate limit or error. If the connection drops, or Telegram gives up for a
 while, the upload resumes from the last stored chunk (16 MB), trying again
 for a few minutes, and waits while your device is offline. An unfinished
 upload is discarded after an hour without progress, or when the server
-restarts.
+restarts. If some of the files you pick are already in the folder (same name
+and size), it asks whether to skip them and upload the rest.
 
 **Thumbnails.** Your browser makes thumbnails of images and videos right
 after uploading them; a video's is a frame a tenth of the way in (at least

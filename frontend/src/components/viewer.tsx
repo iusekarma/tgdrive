@@ -14,37 +14,14 @@ import { formatDate, formatSize, isConvertedImage, isTransportStream, previewKin
 import { useSavedFlag } from "../saved";
 import { frameTime, sendFrame, sendPicture, sendVideoFrame } from "../thumbs";
 import { byName, junk, listZip, pageType, readZipEntry, zipEntryStart, type ZipEntry } from "../zip";
+import { sidecarTag } from "../player/subtitles";
 import { EntryDetails } from "./details";
+import { fade, useIdle } from "./idle";
+import { Loading } from "./loading";
+import { VideoPlayer, type SubtitleFile } from "./player";
 
 const DARK_BUTTON = "inline-flex rounded-lg p-2 text-white/75 hover:bg-white/10 hover:text-white";
 const INFO_KEY = "tgdrive.viewerInfo";
-
-/** A spinner, with how far along it is when the size is known. */
-function Loading({ label = "Loading…", loaded, total }: { label?: string; loaded?: number; total?: number }) {
-  const pct = loaded !== undefined && total ? Math.min(100, Math.floor((loaded / total) * 100)) : null;
-  return (
-    <div role="status" className="flex w-56 max-w-full flex-col items-center gap-3 text-sm text-white/75">
-      <span
-        aria-hidden="true"
-        className="size-9 animate-spin rounded-full border-[3px] border-white/15 border-t-white/80"
-      />
-      <span>
-        {label}
-        {pct !== null && <span className="ml-1.5 tabular-nums text-white">{pct}%</span>}
-      </span>
-      {pct !== null && (
-        <>
-          <span className="h-1 w-full overflow-hidden rounded-full bg-white/10">
-            <span className="block h-full rounded-full bg-[var(--accent)] transition-[width]" style={{ width: `${pct}%` }} />
-          </span>
-          <span className="text-xs tabular-nums text-white/50">
-            {formatSize(loaded!)} of {formatSize(total!)}
-          </span>
-        </>
-      )}
-    </div>
-  );
-}
 
 /** Reads a response body, reporting the bytes read so far (at most once a frame). */
 async function readWithProgress(res: Response, onProgress: (loaded: number) => void, type?: string): Promise<Blob> {
@@ -132,99 +109,18 @@ function TextPreview({ url, size }: { url: string; size: number }) {
   if (text === null) return <Loading loaded={loaded} total={Math.min(size, TEXT_PREVIEW_LIMIT)} />;
   if (text === "") return <p className="text-sm text-white/75">This file is empty.</p>;
   return (
-    <div className="flex h-full w-full max-w-5xl flex-col">
-      <pre className="min-h-0 flex-1 overflow-auto rounded-md border border-line bg-paper p-4 text-sm leading-relaxed text-ink">
+    <div className="flex h-full w-full flex-col">
+      <pre className="min-h-0 flex-1 overflow-auto bg-paper p-4 text-sm leading-relaxed text-ink">
         {text}
       </pre>
       {size > TEXT_PREVIEW_LIMIT && (
-        <p className="mt-2 text-sm text-white/75">Showing the first 512 KB. Download the file to see the rest.</p>
+        <p className="px-4 py-2 text-sm text-white/75">Showing the first 512 KB. Download the file to see the rest.</p>
       )}
     </div>
   );
 }
 
 // --- video -----------------------------------------------------------------
-
-/** Plays MPEG transport streams by repackaging them in the browser (mpegts.js,
- * loaded only when needed). Returns false where Media Source isn't available. */
-function useTransportStream(video: RefObject<HTMLVideoElement | null>, url: string, enabled: boolean) {
-  const [failed, setFailed] = useState(false);
-  useEffect(() => {
-    const el = video.current;
-    if (!enabled || !el) return;
-    let player: { destroy(): void } | null = null;
-    let live = true;
-    void import("mpegts.js").then(({ default: mpegts }) => {
-      if (!live) return;
-      if (!mpegts.isSupported()) return setFailed(true);
-      const p = mpegts.createPlayer(
-        { type: "mpegts", isLive: false, url: new URL(url, location.href).href },
-        { enableWorker: false, lazyLoad: true, seekType: "range" },
-      );
-      p.on(mpegts.Events.ERROR, () => setFailed(true));
-      p.attachMediaElement(el);
-      p.load();
-      if (el.autoplay) void (p.play() as Promise<void> | undefined)?.catch(() => undefined);
-      player = p;
-    }, () => setFailed(true));
-    return () => {
-      live = false;
-      player?.destroy();
-    };
-  }, [video, url, enabled]);
-  return failed;
-}
-
-/** Fills the space it's given from the start, so nothing jumps once the video's size is known. */
-function VideoPlayer({
-  url,
-  name,
-  autoPlay = true,
-  onLoadedMetadata,
-  onTimeUpdate,
-}: {
-  url: string;
-  name: string;
-  autoPlay?: boolean;
-  onLoadedMetadata?: (video: HTMLVideoElement) => void;
-  onTimeUpdate?: (video: HTMLVideoElement) => void;
-}) {
-  const ref = useRef<HTMLVideoElement>(null);
-  const stream = isTransportStream(name);
-  const streamFailed = useTransportStream(ref, url, stream);
-  const [failed, setFailed] = useState(false);
-  // Until the first frame is in, and whenever playback stalls for more.
-  const [buffering, setBuffering] = useState(true);
-  if (failed || streamFailed) return <Unplayable what="video" />;
-  return (
-    <div className="relative h-full w-full">
-      <video
-        ref={ref}
-        src={stream ? undefined : url}
-        controls
-        autoPlay={autoPlay}
-        preload="metadata"
-        className="block h-full w-full bg-black"
-        onError={() => setFailed(true)}
-        onLoadedMetadata={(e) => {
-          // Not playing yet, so it may not fetch a frame until asked: ready enough.
-          if (!autoPlay) setBuffering(false);
-          onLoadedMetadata?.(e.currentTarget);
-        }}
-        onTimeUpdate={(e) => onTimeUpdate?.(e.currentTarget)}
-        onLoadedData={() => setBuffering(false)}
-        onCanPlay={() => setBuffering(false)}
-        onPlaying={() => setBuffering(false)}
-        onWaiting={() => setBuffering(true)}
-      />
-      {buffering && (
-        <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-          <Loading />
-        </div>
-      )}
-    </div>
-  );
-}
 
 /** A video opened without a thumbnail gets one, from a frame frameTime() in
  * read by a hidden second player. Transport streams, which only play
@@ -233,11 +129,13 @@ function VideoPreview({
   drive,
   entry,
   url,
+  subtitles,
   learn,
 }: {
   drive: string;
   entry: Entry;
   url: string;
+  subtitles: SubtitleFile[];
   learn: (info: FileInfo) => void;
 }) {
   const queryClient = useQueryClient();
@@ -248,8 +146,10 @@ function VideoPreview({
   };
   return (
     <VideoPlayer
-      url={url}
+      source={{ url, size: entry.size }}
       name={entry.name}
+      subtitles={subtitles}
+      focus
       onLoadedMetadata={(video) => {
         learn({
           width: video.videoWidth || undefined,
@@ -379,7 +279,7 @@ function ArchivePreview({
   };
 
   return (
-    <div className="flex h-full w-full max-w-4xl flex-col overflow-hidden rounded-lg border border-line bg-paper text-ink">
+    <div className="flex h-full w-full flex-col overflow-hidden bg-paper text-ink">
       <div className="flex items-start gap-3 border-b border-line px-4 py-3">
         <div className="min-w-0 flex-1">
           <nav aria-label="Folder in archive" className="flex flex-wrap items-center gap-1 text-sm">
@@ -613,7 +513,7 @@ function ZipVideo({
   if (src) {
     return (
       <VideoPlayer
-        url={src}
+        source={{ url: src, size: item.size, blob: blob ?? undefined }}
         name={name}
         autoPlay={autoPlay}
         onLoadedMetadata={(v) => v.videoWidth && v.videoHeight && onRatio?.(v.videoWidth / v.videoHeight)}
@@ -673,7 +573,8 @@ function SinglePage({
 
   if (video) {
     return (
-      <div className="flex h-full w-full items-center justify-center">
+      // Its controls stay clear of the reader's own.
+      <div className="flex h-full w-full items-center justify-center pb-14">
         <ZipVideo key={shown.path} drive={drive} archive={archive} item={shown} autoPlay />
       </div>
     );
@@ -692,7 +593,7 @@ function SinglePage({
         <img
           src={src}
           alt={`Page ${current + 1}`}
-          className={`max-h-full max-w-full object-contain transition-opacity ${image.isFetching && !image.data ? "opacity-40" : ""}`}
+          className={`h-full w-full object-contain transition-opacity ${image.isFetching && !image.data ? "opacity-40" : ""}`}
           draggable={false}
         />
       ) : (
@@ -983,32 +884,6 @@ function ComicPreview({
 
 // --- the viewer --------------------------------------------------------------
 
-/** Controls fade out this long after the pointer last moved, unless it rests on one. */
-const IDLE_MS = 2500;
-const fade = (idle: boolean) => `transition-opacity duration-300 ${idle ? "pointer-events-none opacity-0" : ""}`;
-
-function useIdle(root: RefObject<HTMLElement | null>): [boolean, () => void] {
-  const [idle, setIdle] = useState(false);
-  const timer = useRef(0);
-  const wake = useCallback(() => {
-    setIdle(false);
-    window.clearTimeout(timer.current);
-    const check = () => {
-      if (root.current?.querySelector("[data-control]:hover, [data-control]:focus-visible, [data-control] :focus-visible")) {
-        timer.current = window.setTimeout(check, IDLE_MS);
-      } else {
-        setIdle(true);
-      }
-    };
-    timer.current = window.setTimeout(check, IDLE_MS);
-  }, [root]);
-  useEffect(() => {
-    wake();
-    return () => window.clearTimeout(timer.current);
-  }, [wake]);
-  return [idle, wake];
-}
-
 /** PDFs up to this size are fetched whole first, with progress; bigger ones stream into the browser's viewer. */
 const PDF_IN_MEMORY = 200 * 1024 * 1024;
 
@@ -1016,11 +891,13 @@ const PDF_IN_MEMORY = 200 * 1024 * 1024;
 function Stage({
   drive,
   entry,
+  subtitles,
   pager,
   idle,
 }: {
   drive: string;
   entry: Entry;
+  subtitles: SubtitleFile[];
   pager: RefObject<Pager | null>;
   idle: boolean;
 }) {
@@ -1051,7 +928,7 @@ function Stage({
       <img
         src={file.src}
         alt={entry.name}
-        className="max-h-full max-w-full object-contain"
+        className="h-full w-full object-contain"
         onError={() => setFailed(true)}
         onLoad={(e) => {
           const img = e.currentTarget;
@@ -1067,11 +944,11 @@ function Stage({
       />
     );
   }
-  if (kind === "video") return <VideoPreview drive={drive} entry={entry} url={inlineUrl} learn={learn} />;
+  if (kind === "video") return <VideoPreview drive={drive} entry={entry} url={inlineUrl} subtitles={subtitles} learn={learn} />;
   if (kind === "audio") {
     if (failed) return <Unplayable what="audio file" />;
     return (
-      <div className="flex w-full max-w-lg flex-col items-center gap-6">
+      <div className="flex w-full max-w-lg flex-col items-center gap-6 px-4">
         <Music size={72} className="text-white/40" aria-hidden="true" />
         <audio
           src={inlineUrl}
@@ -1088,7 +965,7 @@ function Stage({
     if (file.failed) return <Unplayable what="PDF" />;
     if (pdfInMemory && !file.src) return <Loading loaded={file.loaded} total={entry.size} />;
     return (
-      <div className="relative flex h-full w-full max-w-5xl items-center justify-center">
+      <div className="relative flex h-full w-full items-center justify-center">
         <iframe
           src={file.src ?? inlineUrl}
           title={entry.name}
@@ -1116,12 +993,15 @@ const typing = (target: EventTarget) =>
 export function Viewer({
   drive,
   entries,
+  nearby,
   start,
   locationOf,
   onClose,
 }: {
   drive: string;
   entries: Entry[];
+  /** Everything listed, whatever tab is open: where a video's subtitle files are looked for. */
+  nearby: Entry[];
   start: Entry;
   locationOf: (entry: Entry) => string;
   onClose: () => void;
@@ -1145,6 +1025,12 @@ export function Viewer({
   // A file deleted or renamed meanwhile stays on screen; stepping goes on from where it was.
   const prev = index > 0 ? items[index - 1] : null;
   const next = index >= 0 && index < items.length - 1 ? items[index + 1] : null;
+
+  // "Film.en.srt" in the same folder as "Film.mkv".
+  const place = locationOf(entry);
+  const subtitles = nearby
+    .filter((e) => e.kind === "file" && sidecarTag(entry.name, e.name) !== null && locationOf(e) === place)
+    .map((e) => ({ id: e.id, name: e.name, url: api.fileUrl(drive, e.id) }));
 
   function step(dir: -1 | 1) {
     if (pager.current?.(dir)) return;
@@ -1176,7 +1062,11 @@ export function Viewer({
 
   const kind = previewKind(entry.name, entry.size);
   const swipeable = kind === "image" || kind === "audio" || kind === "comic" || kind === "archive";
-  const arrow = `absolute top-1/2 -translate-y-1/2 rounded-full border border-white/10 bg-black/55 p-2.5 text-white/80 hover:bg-black/70 hover:text-white ${fade(idle)}`;
+  // With a mouse, shown only while it is over them (a larger area than the button,
+  // short of the edge, where scrollbars are). On a touch screen they fade with the other controls.
+  const arrow = `group absolute top-1/2 flex -translate-y-1/2 items-center outline-none ${fade(idle)} mouse:pointer-events-auto mouse:h-64 mouse:w-24 mouse:opacity-0 mouse:hover:opacity-100 mouse:focus-visible:opacity-100`;
+  const disc =
+    "rounded-full border border-white/10 bg-black/55 p-2.5 text-white/80 group-hover:bg-black/75 group-hover:text-white group-focus-visible:outline-2 group-focus-visible:outline-[var(--accent)]";
 
   return (
     <dialog
@@ -1225,21 +1115,23 @@ export function Viewer({
 
       <div className="relative flex min-h-0 flex-1">
         <div
-          className="relative flex min-w-0 flex-1 items-center justify-center p-2 sm:px-16 sm:py-4"
+          className="relative flex min-w-0 flex-1 items-center justify-center"
           onPointerDown={swipeable ? onPointerDown : undefined}
           onPointerUp={swipeable ? onPointerUp : undefined}
         >
-          <Stage key={entry.id} drive={drive} entry={entry} pager={pager} idle={idle} />
+          <Stage key={entry.id} drive={drive} entry={entry} subtitles={subtitles} pager={pager} idle={idle} />
           {prev && (
             <button
               type="button"
               data-control
               onClick={() => setEntry(prev)}
               aria-label={`Previous: ${prev.name}`}
-              title="Previous (←)"
-              className={`${arrow} left-2`}
+              title={`Previous (${kind === "video" ? "Shift+" : ""}←)`}
+              className={`${arrow} left-4 justify-start`}
             >
-              <ChevronLeft size={24} />
+              <span className={disc}>
+                <ChevronLeft size={24} />
+              </span>
             </button>
           )}
           {next && (
@@ -1248,10 +1140,12 @@ export function Viewer({
               data-control
               onClick={() => setEntry(next)}
               aria-label={`Next: ${next.name}`}
-              title="Next (→)"
-              className={`${arrow} right-2`}
+              title={`Next (${kind === "video" ? "Shift+" : ""}→)`}
+              className={`${arrow} right-4 justify-end`}
             >
-              <ChevronRight size={24} />
+              <span className={disc}>
+                <ChevronRight size={24} />
+              </span>
             </button>
           )}
         </div>

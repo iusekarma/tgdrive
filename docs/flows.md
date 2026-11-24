@@ -154,7 +154,8 @@ What happens in other cases:
 | User cancels | — | Aborts XHR, `DELETE /uploads/{id}`; server purges stored chunks |
 | More than 8 tries in a row without progress | — | Shows the error with Retry and Discard |
 | Tab closed or reloaded mid-upload | `GET /uploads` lists it when the drive is next opened | Shows it as unfinished: choose the file again to resume, or discard it |
-| The same file is uploaded again into the same folder | `POST /uploads` returns the unfinished upload's id and `stored` | Resumes from `stored` instead of failing with "already exists" |
+| Files picked are already in the folder (same name and size) | `GET /nodes` lists them | Asks whether to skip them and upload the rest |
+| The same unfinished file is uploaded again into the same folder | `POST /uploads` returns the unfinished upload's id and `stored` | Resumes from `stored` instead of failing with "already exists" |
 
 ## Telegram rate limits during an upload
 
@@ -201,7 +202,9 @@ sequenceDiagram
     end
 ```
 
-Only chunks overlapping the requested range are fetched from Telegram.
+Only chunks overlapping the requested range are fetched from Telegram. The
+player asks for at most one chunk's worth at a time and stops about 60 s ahead
+of the playhead (see [the player](frontend.md#componentsplayertsx-and-player)).
 
 ## Deleting
 

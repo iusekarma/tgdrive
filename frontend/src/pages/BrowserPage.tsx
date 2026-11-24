@@ -1092,7 +1092,14 @@ export default function BrowserPage() {
         />
       )}
       {open?.type === "preview" && (
-        <Viewer drive={drive} entries={entries} start={open.entry} locationOf={locationOf} onClose={close} />
+        <Viewer
+          drive={drive}
+          entries={entries}
+          nearby={everything}
+          start={open.entry}
+          locationOf={locationOf}
+          onClose={close}
+        />
       )}
       {open?.type === "details" && (
         <DetailsDialog drive={drive} entry={open.entry} location={locationOf(open.entry)} onClose={close} />

@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Check, ChevronDown, ChevronUp, CircleAlert, CirclePause, RotateCw, Upload, WifiOff, X } from "lucide-react";
+import { Check, ChevronDown, ChevronRight, ChevronUp, CircleAlert, CirclePause, RotateCw, Upload, WifiOff, X } from "lucide-react";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { api, ApiError, sendUpload, type Entry, type QueuedUpload, type UploadStatus, type UploadWait } from "../api";
@@ -7,7 +7,7 @@ import { formatDuration, formatSize } from "../format";
 import { infoKey } from "../fileinfo";
 import { useSavedFlag } from "../saved";
 import { sendDetails } from "../thumbs";
-import { ICON_BUTTON } from "./ui";
+import { Button, Dialog, DialogActions, ICON_BUTTON } from "./ui";
 
 /** "interrupted": left unfinished on the server (e.g. by a closed tab) until its file is chosen again. */
 type Status =
@@ -62,6 +62,18 @@ type Job = {
   base?: number;
   /** When this run started and from which byte, for its average speed. */
   run?: { at: number; from: number };
+};
+
+/** Files picked to upload, some of which (`there`) are already in the drive: whether to skip those is being asked. */
+type Prompt = {
+  id: number;
+  drive: string;
+  parent: string | null;
+  files: Picked[];
+  emptyFolders: string[][];
+  there: Set<Picked>;
+  /** Some of `there` are still in this tab's queue. */
+  queued: boolean;
 };
 
 /** An upload the server has but this tab has no file for. */
@@ -175,6 +187,54 @@ async function folderFor(batch: Batch, dirs: string[]): Promise<string | null> {
   return id;
 }
 
+type Folder = { files: Picked[]; folders: Map<string, Folder> };
+
+/** How many folders to list at once while looking for files already uploaded. */
+const CHECKS = 4;
+
+/** Which of the files the drive already has where they would go: same folder, name and size.
+ * Folders the drive doesn't have aren't looked into, so a new folder costs one request. */
+async function alreadyThere(drive: string, parent: string | null, files: Picked[]): Promise<Set<Picked>> {
+  const root: Folder = { files: [], folders: new Map() };
+  for (const picked of files) {
+    let folder = root;
+    for (const name of picked.dirs) {
+      let next = folder.folders.get(name);
+      if (!next) folder.folders.set(name, (next = { files: [], folders: new Map() }));
+      folder = next;
+    }
+    folder.files.push(picked);
+  }
+  const there = new Set<Picked>();
+  let level = [{ id: parent, folder: root }];
+  while (level.length > 0) {
+    const below: typeof level = [];
+    for (let i = 0; i < level.length; i += CHECKS) {
+      await Promise.all(
+        level.slice(i, i + CHECKS).map(async ({ id, folder }) => {
+          const { entries } = await api.list(drive, id);
+          const byName = new Map(entries.map((e) => [e.name, e]));
+          for (const picked of folder.files) {
+            const entry = byName.get(picked.file.name);
+            if (entry?.kind === "file" && entry.size === picked.file.size) there.add(picked);
+          }
+          for (const [name, sub] of folder.folders) {
+            const entry = byName.get(name);
+            if (entry?.kind === "dir") below.push({ id: entry.id, folder: sub });
+          }
+        }),
+      );
+    }
+    level = below;
+  }
+  return there;
+}
+
+/** Where a file goes, to tell whether it is in this tab's queue already. */
+function destination(drive: string, parent: string | null, { file, dirs }: Picked): string {
+  return JSON.stringify([drive, parent, ...dirs, file.name, file.size]);
+}
+
 /** Files chosen with a folder picker carry their path inside the chosen folder. */
 export function pickedFromInput(files: FileList | null): Picked[] {
   return Array.from(files ?? []).map((file) => ({
@@ -241,6 +301,8 @@ export function UploadsProvider({ children }: { children: ReactNode }) {
   /** Unfinished uploads found on the server, waiting for their file to be chosen again. */
   const leftovers = useRef(new Map<number, Leftover>());
   const nextId = useRef(1);
+  /** Asked one at a time, oldest first. */
+  const [prompts, setPrompts] = useState<Prompt[]>([]);
 
   const vault = useQuery({ queryKey: ["vault"], queryFn: api.vault, staleTime: Infinity });
   const unlocked = vault.data?.unlocked === true;
@@ -530,6 +592,7 @@ export function UploadsProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (!unlocked) {
+      setPrompts([]); // they show file names
       lineRef.current = EMPTY_LINE;
       setLine(EMPTY_LINE);
       reported.current.clear();
@@ -562,8 +625,8 @@ export function UploadsProvider({ children }: { children: ReactNode }) {
     if (syncWanted > 0 && unlocked) void syncNow();
   }, [syncWanted, unlocked, syncNow]);
 
-  const enqueue = useCallback(
-    (drive: string, parent: string | null, files: Picked[], emptyFolders: string[][] = []) => {
+  const add = useCallback(
+    (drive: string, parent: string | null, files: Picked[], emptyFolders: string[][]) => {
       const batch: Batch = { drive, parent, folders: new Map() };
       const added: Item[] = [];
       for (const dirs of emptyFolders) {
@@ -589,7 +652,39 @@ export function UploadsProvider({ children }: { children: ReactNode }) {
     [requestSync],
   );
 
+  /** Queues the files, first asking whether to skip any that were uploaded before (the server would refuse them). */
+  const enqueue = useCallback(
+    (drive: string, parent: string | null, files: Picked[], emptyFolders: string[][] = []) => {
+      if (files.length === 0) return add(drive, parent, files, emptyFolders);
+      // Read before asking the server, so a file that finishes meanwhile is found in one or the other.
+      const jobs = current.current ? [current.current.job, ...queue.current] : queue.current;
+      const queued = new Set<string>();
+      for (const { batch, dirs, file } of jobs) {
+        if (file) queued.add(destination(batch.drive, batch.parent, { file, dirs }));
+      }
+      alreadyThere(drive, parent, files).then(
+        (there) => {
+          const stored = there.size;
+          for (const picked of files) if (queued.has(destination(drive, parent, picked))) there.add(picked);
+          if (there.size === 0) return add(drive, parent, files, emptyFolders);
+          const prompt: Prompt = { id: nextId.current++, drive, parent, files, emptyFolders, there, queued: there.size > stored };
+          setPrompts((list) => [...list, prompt]);
+        },
+        () => add(drive, parent, files, emptyFolders), // each upload finds out for itself
+      );
+    },
+    [add],
+  );
+
+  function answer(prompt: Prompt, upload: boolean) {
+    setPrompts((list) => list.filter((p) => p !== prompt));
+    if (!upload) return;
+    const rest = prompt.files.filter((picked) => !prompt.there.has(picked));
+    if (rest.length > 0 || prompt.emptyFolders.length > 0) add(prompt.drive, prompt.parent, rest, prompt.emptyFolders);
+  }
+
   const renameDrive = useCallback((from: string, to: string) => {
+    setPrompts((list) => list.map((p) => (p.drive === from ? { ...p, drive: to } : p)));
     const jobs = [...queue.current, ...failed.current.values()];
     if (current.current) jobs.push(current.current.job);
     for (const { batch } of jobs) if (batch.drive === from) batch.drive = to;
@@ -730,6 +825,9 @@ export function UploadsProvider({ children }: { children: ReactNode }) {
   const finished = (row: (typeof rows)[number]) => row.item.status === "done" || row.item.status === "cancelled";
   rows.sort((a, b) => Number(finished(a)) - Number(finished(b)));
   const shown = rows.map((row) => row.item);
+  // Failed rows have a section of their own, folded away, so they don't push the rest out of view.
+  const failures = rows.filter((row) => row.item.status === "error");
+  const listed = rows.filter((row) => row.item.status !== "error");
 
   const sending = items.some((item) => ACTIVE.includes(item.status));
   const busy = shown.some((item) => ACTIVE.includes(item.status));
@@ -762,6 +860,18 @@ export function UploadsProvider({ children }: { children: ReactNode }) {
 
   const [minimized, setMinimized] = useSavedFlag(MINIMIZED_KEY);
 
+  const rowFor = ({ key, item, other }: (typeof rows)[number]) => (
+    <UploadRow
+      key={key}
+      item={item}
+      other={other}
+      onCancel={() => (other ? cancelOther(key) : cancel(item.id))}
+      onRetry={() => retry(item.id)}
+      onResume={(file) => resume(item.id, file)}
+      onDiscard={() => discard(item.id)}
+    />
+  );
+
   const value = useMemo(() => ({ enqueue, renameDrive, adopt }), [enqueue, renameDrive, adopt]);
 
   return (
@@ -780,22 +890,110 @@ export function UploadsProvider({ children }: { children: ReactNode }) {
             onCancelAll={cancelAll}
             onDismiss={dismissAll}
           />
-          <ul id="upload-list" hidden={minimized} className="max-h-64 overflow-y-auto">
-            {rows.map(({ key, item, other }) => (
-              <UploadRow
-                key={key}
-                item={item}
-                other={other}
-                onCancel={() => (other ? cancelOther(key) : cancel(item.id))}
-                onRetry={() => retry(item.id)}
-                onResume={(file) => resume(item.id, file)}
-                onDiscard={() => discard(item.id)}
-              />
-            ))}
-          </ul>
+          <div id="upload-list" hidden={minimized}>
+            {listed.length > 0 && (
+              <ul className="max-h-[min(16rem,40dvh)] overflow-y-auto">{listed.map(rowFor)}</ul>
+            )}
+            {failures.length > 0 && (
+              <Failures count={failures.length} divided={listed.length > 0}>
+                {failures.map(rowFor)}
+              </Failures>
+            )}
+          </div>
         </section>
       )}
+      {prompts.length > 0 && (
+        <SkipDialog
+          key={prompts[0].id}
+          prompt={prompts[0]}
+          onCancel={() => answer(prompts[0], false)}
+          onSkip={() => answer(prompts[0], true)}
+        />
+      )}
     </Context.Provider>
+  );
+}
+
+/** The failed uploads, behind a line saying how many there are. */
+function Failures({ count, divided, children }: { count: number; divided: boolean; children: ReactNode }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className={divided ? "border-t border-line" : ""}>
+      <button
+        type="button"
+        onClick={() => setOpen(!open)}
+        aria-expanded={open}
+        aria-controls="failed-uploads"
+        className="flex w-full items-center gap-2 px-4 py-2.5 text-left text-[13px] font-medium text-danger hover:bg-ink/4"
+      >
+        <CircleAlert size={16} className="shrink-0" aria-hidden="true" />
+        <span className="flex-1">{count} failed</span>
+        <ChevronRight
+          size={16}
+          className={`shrink-0 text-muted transition-transform ${open ? "rotate-90" : ""}`}
+          aria-hidden="true"
+        />
+      </button>
+      <ul
+        id="failed-uploads"
+        hidden={!open}
+        className="max-h-[min(12rem,30dvh)] overflow-y-auto border-t border-line"
+      >
+        {children}
+      </ul>
+    </div>
+  );
+}
+
+/** How many of the files to skip are named in the dialog. */
+const NAMED = 100;
+
+/** Asks whether to go on without the files the drive already has. */
+function SkipDialog({
+  prompt,
+  onCancel,
+  onSkip,
+}: {
+  prompt: Prompt;
+  onCancel: () => void;
+  onSkip: () => void;
+}) {
+  const { files, there, emptyFolders } = prompt;
+  const skipped = there.size;
+  const rest = files.length - skipped;
+  const all = rest === 0;
+  // Empty folders are still made when every file is skipped.
+  const nothing = all && emptyFolders.length === 0;
+  const one = skipped === 1;
+  const names = [...there].slice(0, NAMED).map(({ file, dirs }) => [...dirs, file.name].join("/"));
+
+  const state = prompt.queued ? "already uploaded or in the queue" : "already uploaded";
+  let title: string;
+  if (all) title = one ? `This file is ${state}` : `All ${skipped} files are ${state}`;
+  else title = `${skipped} of ${files.length} files ${one ? "is" : "are"} ${state}`;
+
+  return (
+    <Dialog title={title} onClose={onCancel}>
+      <p className="text-sm text-muted">
+        {one ? "A file" : "Files"} with the same name and size {one ? "is" : "are"} already in the same place
+        {prompt.queued ? ", or on the way there." : "."}
+        {!all && ` Skip ${one ? "it" : "them"} and upload the other ${rest === 1 ? "file" : `${rest} files`}?`}
+      </p>
+      <ul className="mt-4 max-h-[min(12rem,30dvh)] overflow-y-auto rounded-lg border border-line px-3 py-2 text-[13px]">
+        {names.map((name) => (
+          <li key={name} className="truncate py-0.5">
+            {name}
+          </li>
+        ))}
+        {skipped > NAMED && <li className="py-0.5 text-muted">and {skipped - NAMED} more</li>}
+      </ul>
+      <DialogActions>
+        {!nothing && <Button onClick={onCancel}>Cancel</Button>}
+        <Button variant="primary" data-autofocus onClick={onSkip}>
+          {nothing ? "OK" : all ? "Make empty folders" : `Skip ${one ? "it" : skipped} and upload ${rest}`}
+        </Button>
+      </DialogActions>
+    </Dialog>
   );
 }
 

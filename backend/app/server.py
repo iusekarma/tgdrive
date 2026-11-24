@@ -869,7 +869,9 @@ async def delete_thumbnail(node_id: str, drive: Drive = Depends(unlocked_drive),
 # and blob: only for thumbnails it has decrypted.
 UI_CSP = "; ".join([
     "default-src 'self'",
-    "script-src 'self'",
+    # WebAssembly and workers made from a blob: the player's AC-3, DTS and TrueHD decoders.
+    "script-src 'self' 'wasm-unsafe-eval'",
+    "worker-src 'self' blob:",
     "style-src 'self' 'unsafe-inline'",
     "img-src 'self' blob: data:",
     "media-src 'self' blob:",

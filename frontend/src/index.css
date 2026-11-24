@@ -1,5 +1,8 @@
 @import "tailwindcss";
 
+/* A window worked with a mouse, rather than a phone or tablet. */
+@custom-variant mouse (@media (hover: hover) and (min-width: 40rem));
+
 /* Neutral greys, so the files are the only colour on the page. Two hues carry
  * meaning: sky for what is selected, focused or moving; brass for what is locked.
  * Each value is light, then dark. */
