@@ -1,4 +1,4 @@
-import "@fontsource-variable/bricolage-grotesque";
+import "@fontsource-variable/geist";
 import "./index.css";
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -8,6 +8,7 @@ import { BrowserRouter } from "react-router-dom";
 
 import { ApiError, setVaultLockedHandler } from "./api";
 import App from "./App";
+import { applySavedTheme } from "./theme";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -21,6 +22,8 @@ const queryClient = new QueryClient({
 
 // An idle timeout or a server restart locks the vault: send the app back to the login screen.
 setVaultLockedHandler(() => void queryClient.invalidateQueries({ queryKey: ["vault"] }));
+
+applySavedTheme();
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>

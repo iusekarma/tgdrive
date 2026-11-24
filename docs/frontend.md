@@ -8,7 +8,7 @@ Source in [frontend/src](../frontend/src).
 | `@tanstack/react-query` | All server data: fetching, caching, invalidation |
 | `react-router-dom` | Routes `/`, `/d/:drive`, `/d/:drive/:folderId` |
 | `lucide-react` | Icons |
-| `@fontsource-variable/bricolage-grotesque` | The UI font, bundled (the CSP allows no third-party origins) |
+| `@fontsource-variable/geist` | The UI font, bundled (the CSP allows no third-party origins) |
 | `mpegts.js` | Plays `.ts`/`.m2ts` video through Media Source; loaded only when one is opened |
 
 The browser never holds a key. It sends passwords to the server, gets a
@@ -22,10 +22,13 @@ flowchart TD
     main["main.tsx<br/>QueryClient · BrowserRouter"] --> App["App.tsx"]
     App --> UP["UploadsProvider<br/>(components/uploads.tsx)<br/>upload queue + panel"]
     UP --> VG["VaultGate<br/>setup / login screens"]
-    VG -->|"/"| DP["DrivesPage"]
-    VG -->|"/d/:drive[/:folderId]"| BP["BrowserPage"]
+    VG --> SH["Shell<br/>(components/shell.tsx)<br/>sidebar + panel"]
+    SH --> SB["Sidebar<br/>drives + folder tree"]
+    SH -->|"/"| DP["DrivesPage"]
+    SH -->|"/d/:drive[/:folderId]"| BP["BrowserPage"]
     DP --> DD["driveDialogs.tsx<br/>Unlock · Create · Rename · Password ·<br/>MasterPassword · Delete · RecoveryKey"]
-    BP --> SB["Sidebar<br/>drives + folder tree"]
+    BP --> LS["listing.tsx<br/>list and grid"]
+    BP --> BB["browserBars.tsx<br/>breadcrumbs · search · tabs · selection bar"]
     BP --> FD["fileDialogs.tsx<br/>Name · Delete · Move"]
     BP --> VW["viewer.tsx<br/>full-window viewer"]
     BP --> TH["thumbs.ts"]
@@ -47,7 +50,7 @@ invalidation refreshes everything affected:
 | `["vault"]` | `GET /vault` (set up? unlocked?) | Login, logout, and any response saying `locked: "vault"` |
 | `["drives"]` | `GET /drives` | Drives created, renamed, deleted, locked, password changed |
 | `["nodes", drive, parent]` | One folder listing | Any change in that drive (`["nodes", drive]` prefix) |
-| `["nodes", drive, "search", q]` | Search results | Same prefix, so results refresh with the folder |
+| `["nodes", drive, "search", q, scope]` | Search results | Same prefix, so results refresh with the folder |
 | `["info", drive, id]` | A file's details | Never refetched (`staleTime: Infinity`); updated in place by whatever learns more |
 | `["webdav", drive]` | `GET /drives/{name}/webdav` | Set in place when WebDAV is turned on or off |
 | `["zip", drive, id]` | A zip's entry list | Never refetched; dropped with everything else when the vault locks |
@@ -67,7 +70,45 @@ Locking or leaving one drive removes `["nodes", drive]` and its thumbnails.
 
 `main.tsx` creates the `QueryClient`, registers the vault-locked handler
 (`setVaultLockedHandler` → invalidate `["vault"]`), and renders. `App.tsx`
-declares the routes; unknown paths redirect to `/`.
+declares the routes, all inside `Shell`; unknown paths redirect to `/`.
+
+## Look and layout
+
+Colours are CSS variables in `index.css`, each a `light-dark()` pair: neutral
+greys (`shell`, `paper`, `surface`, `ink`, `muted`, `line`), plus `accent` for
+what is selected, focused or in progress, `brass` for what is locked, and
+`danger`. `theme.ts` keeps the choice of System, Light or Dark (Settings →
+Appearance, `tgdrive.theme`) by setting `data-theme` on `<html>`, which sets
+`color-scheme`.
+
+Rules that keep the layout from breaking:
+
+- **Size by container, not window.** `Page` is a container, and everything in
+  it uses container variants (`@2xl:`, `@max-md:`). The sidebar and the
+  details panel take their share of the window, so its width says little
+  about the room there is.
+- **Bars are one row.** The top bar (56px), the tabs and sort bar (48px) and
+  the selection bar never wrap: labels give way to icons, tabs scroll
+  sideways, breadcrumbs fold into a menu.
+- **Nothing that comes and goes takes room.** The selection bar, progress and
+  messages float in the `Dock`; the thumbnails button sits in a line whose
+  height is fixed.
+
+## components/shell.tsx
+
+`Shell` is the layout route: the `Sidebar` and the panel the page is drawn in.
+From the `lg` breakpoint up the panel scrolls inside the window; below it the
+window scrolls and the sidebar is a drawer (a modal `<dialog>`). `Page` is the
+scrolling part, `Topbar` sticks to its top, and `Dock` floats over its foot,
+sharing its height as `--dock` so the uploads panel sits above it. `Toast` is one
+message in the dock. The master password dialog lives here too.
+
+## components/menu.tsx
+
+`Menu`, `MenuItem` and friends. An open menu is a `popover` in the browser's top
+layer, so no scrolling panel, sticky bar or dialog clips or covers it. It opens
+upwards where there is more room, closes when anything scrolls, and takes
+the keyboard (arrows, Home, End, Esc) while open, so the page's shortcuts don't fire.
 
 ## api.ts
 
@@ -107,7 +148,9 @@ cached queries and refetches the vault status.
 ## components/uploads.tsx
 
 The upload queue, its retry logic, and the floating progress panel. The
-most involved part of the frontend.
+most involved part of the frontend. While anything is uploading, the tab's
+title shows the overall percentage too (`42% uploaded · tgdrive`), counted as
+the panel does (`tally()`).
 
 **Input.** `pickedFromInput()` handles the file and folder pickers (folder
 paths come from `webkitRelativePath`). `readDropped()` walks dropped
@@ -213,7 +256,7 @@ it on the server and makes a new one with `makeThumbnail()` (below): an
 image up to 50 MB on the server, so the browser downloads nothing. `useThumbnailVersion()`
 lets anything showing the old one load the new one.
 
-**Make thumbnails** in a folder's toolbar runs `makeThumbnail()` on each image,
+**Make thumbnails** under a folder's name (with how many it lacks) runs `makeThumbnail()` on each image,
 video and comic there without one, one at a time. Images the server can thumbnail
 (up to 50 MB) are left to it, so the browser doesn't download them; others,
 videos and comics are drawn from the server's copy, a video read only as far as its
@@ -252,23 +295,33 @@ server), and `driveUrl(drive, folderId)`.
 
 ## pages/DrivesPage.tsx
 
-The home page: every drive as a list or grid, with a lock dial showing
+The home page: every drive as cards or a list, with a lock dial showing
 whether it is unlocked. Opening a locked drive shows `UnlockDialog`.
 A drive's menu offers lock, rename, add/change/remove password, WebDAV
-access, and delete; drives with WebDAV on say so under their name.
-The page header offers create drive, change master password and lock
-everything.
+access, and delete; drives with WebDAV on carry a tag.
 
 If `BrowserPage` finds its drive locked (session idle, locked elsewhere), it
 navigates here with `state: { unlock, from }`. The page opens the unlock
-dialog straight away and returns to the folder afterwards.
+dialog straight away and returns to the folder afterwards. The sidebar uses
+the same way in: `{ unlock }` for a locked drive, `{ create: true }` for its
+create button.
 
 ## pages/BrowserPage.tsx
 
 The file browser for one drive and folder.
 
 - **Listing**: `["nodes", drive, parent]`, as a list or grid (remembered in
-  `localStorage`), with thumbnails, breadcrumbs, and the `Sidebar`.
+  `localStorage`), drawn by `components/listing.tsx`. A whole row opens its
+  item. In the grid, folders at the front are small tiles and the rest get a
+  thumbnail.
+- **Bars** (`components/browserBars.tsx`): the top bar has breadcrumbs, search,
+  the details toggle and the drive's menu. Upload files, Upload folder and New
+  folder are cards at the top of the folder; once those scroll out of
+  view the top bar offers an **Add** menu, and narrow pages have it floating.
+- **Tabs** (`filters.ts`): one per sort of thing in the folder or the results
+  (folders, images, videos, …), with counts. A tab narrows `entries`, so
+  selection, keyboard and the viewer's stepping stay within it. It resets
+  when the folder changes.
 - **Sorting** (`sorting.ts`, `components/SortMenu.tsx`): by name (natural
   order, so `2` before `10`), type (extension), size or date added, either
   way, folders first or mixed in; ties fall back to the name. Done in the
@@ -279,47 +332,53 @@ The file browser for one drive and folder.
   unless a sort is picked, which lasts until the search ends.
 - **Search**: the query lives in the URL (`?q=`), debounced by 250 ms, so
   Back returns to the results. Results replace the folder listing and show
-  each match's folder path. `/` focuses the box.
+  each match's folder path. A search covers the open folder and everything
+  below it (`scope`); the button beside the match count widens it to the
+  whole drive (`?in=drive`), until the search is cleared or another folder
+  opened. `/` focuses the box.
 - **Selection**: click with Ctrl/Cmd to toggle, Shift for a range; once
   anything is selected, plain clicks select too. Ctrl/Cmd+A selects all,
   Esc clears, Delete/Backspace deletes, F2 renames (one item in
-  `NameDialog`, several in `BulkRenameDialog`). The selection toolbar also
-  has **All** and **Invert**.
+  `NameDialog`, several in `BulkRenameDialog`). The actions float in the
+  dock (`SelectionBar`), whose menu also has **Select all**, **Invert
+  selection** and, for one item, **Advanced rename**.
 - **Keyboard**: a highlight (`cursor`, an entry id, outlined) is separate
-  from the selection. Arrows move it (Up/Down by a whole row in the grid,
-  counted from the grid's `grid-template-columns`), as do Home/End and
+  from the selection. Arrows move it (Up/Down by a whole row in the grid, to
+  the nearest item by where they are on screen: `rowAway`), as do Home/End and
   PageUp/PageDown; Shift extends the selection from the anchor. Enter opens
   the highlighted item (`openEntry`: folder, preview or download), Space
   selects it, Backspace or Alt+↑ goes up a folder, and typing letters jumps
   to the next name starting with them (repeating one letter cycles). Delete
   and F2 act on the highlighted item when nothing is selected. Back in a
   parent folder, the folder just left is highlighted. Enter and Space are
-  left to a focused button or link.
+  left to a focused button or link. `?` lists all of this (`ShortcutsDialog`).
 - **Bulk rename**: `BulkRenameDialog` gets each item with its folder, and
   the names of the folder's other items (only known for the folder shown;
-  for search results the server checks). After renaming, a bar offers
+  for search results the server checks). After renaming, the dock offers
   **Undo**, which sends the old names back in one `renameMany`.
 - **Actions**: new folder, upload files, upload folder, rename, move (one or
   many), delete (one or many), download, preview, lock drive. A folder,
   or more than one item, downloads as a zip (`downloadZip`: `api.createZip`,
   then a link click on the `url` it returns), named after the folder or
   the folder being shown.
-- **Drag and drop**: files and folders dropped anywhere on the page go to
+- **Drag and drop**: files and folders dropped anywhere in the window go to
   `uploads.enqueue` for the current folder.
 - **Opening**: folders navigate; previewable files open the `Viewer`;
   others download.
 - **Details**: each item's menu has **Details**, which opens
-  `DetailsDialog`. On wide screens the panel button beside the view toggle
+  `DetailsDialog`. On wide screens the panel button in the top bar
   shows `DetailsPanel` (remembered in `localStorage`): the one selected item,
   totals for several, or the folder when nothing is selected.
 
 ## components/Sidebar.tsx
 
-Lists every drive, with the folder tree of unlocked drives. Folders load
+On every page, as part of `Shell`: every drive, with the folder tree of
+unlocked drives, then **Lock tgdrive** and the settings (appearance, master
+password) at the foot. It collapses to a rail of icons (`tgdrive.rail`). Folders load
 lazily (`["nodes", drive, id]`, only when expanded), sharing the cache with
 the main listing. Nothing opens on its own: only the arrows expand folders,
-and the locate button beside "Drives" opens the tree down to the folder being
-viewed and scrolls it into view.
+and the locate button beside "Drives" (shown inside a folder) opens the tree down
+to the folder being viewed and scrolls it into view.
 Clicking a locked drive goes to the drives page to unlock it.
 
 ## components/driveDialogs.tsx

@@ -145,7 +145,7 @@ export function MoveDialog({
         ))}
       </nav>
 
-      <div className="mt-3 h-56 overflow-y-auto rounded-md border border-line bg-surface">
+      <div className="mt-3 h-56 overflow-y-auto rounded-lg border border-line bg-paper p-1">
         {listing.isPending && <p className="p-3 text-sm text-muted">Loading…</p>}
         {listing.error && <p className="p-3 text-sm text-danger">{listing.error.message}</p>}
         {listing.data && folders.length === 0 && <p className="p-3 text-sm text-muted">No folders in here.</p>}
@@ -155,9 +155,9 @@ export function MoveDialog({
               <button
                 type="button"
                 onClick={() => setTarget(f.id)}
-                className="flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm hover:bg-ink/5"
+                className="flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-sm hover:bg-ink/5"
               >
-                <Folder size={16} className="shrink-0 text-brass" aria-hidden="true" />
+                <Folder size={16} className="shrink-0 fill-current text-muted" aria-hidden="true" />
                 <span className="truncate">{f.name}</span>
               </button>
             </li>

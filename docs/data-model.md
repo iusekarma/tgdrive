@@ -86,7 +86,7 @@ table would cascade into every node.
 **`nodes`** is the folder tree for all drives. Both files and folders are
 nodes. Names are encrypted, so the database cannot sort or search by name:
 `Storage.list()` decrypts and sorts in Python (folders first, then by name),
-and `Storage.search()` decrypts every name in the drive in memory. The index
+and `Storage.search()` decrypts every name in the drive, or under one folder, in memory. The index
 `nodes_by_parent (drive_id, parent_id)` keeps folder listings fast.
 
 Name uniqueness within a folder is enforced in Python

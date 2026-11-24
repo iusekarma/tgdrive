@@ -125,7 +125,7 @@ export function UnlockDialog({
         <DialogActions>
           <button
             type="button"
-            className="mr-auto text-sm text-teal underline underline-offset-2"
+            className="mr-auto self-center text-sm text-muted underline underline-offset-4 hover:text-ink"
             onClick={() => {
               setError(null);
               setMode(mode === "password" ? "recovery" : "password");
@@ -178,7 +178,7 @@ export function CreateDriveDialog({
         <label className="flex items-start gap-2.5 text-sm">
           <input
             type="checkbox"
-            className="mt-0.5 h-4 w-4"
+            className="mt-0.5"
             checked={protect}
             onChange={(e) => setProtect(e.target.checked)}
           />
@@ -305,14 +305,14 @@ export function RecoveryKeyDialog({
   return (
     <Dialog title={title} onClose={() => saved && onDone()}>
       <p className="text-sm text-muted">{children} It is shown once and is not stored anywhere.</p>
-      <div className="mt-4 rounded-md border border-brass/50 bg-brass/10 p-4">
+      <div className="mt-4 rounded-lg border border-brass/50 bg-brass/10 p-4">
         <p className="select-all break-words text-lg font-medium leading-relaxed tracking-wide">{recoveryKey}</p>
       </div>
       <CopyButton text={recoveryKey} label="Copy key" className="mt-3" />
       <label className="mt-5 flex items-start gap-2.5 text-sm">
         <input
           type="checkbox"
-          className="mt-0.5 h-4 w-4"
+          className="mt-0.5"
           checked={saved}
           onChange={(e) => setSaved(e.target.checked)}
         />
@@ -533,7 +533,7 @@ function CopyRow({ label, value }: { label: string; value: string }) {
       <p className="text-sm font-medium">{label}</p>
       <div className="mt-1.5 flex items-center gap-2">
         <code
-          className="min-w-0 flex-1 select-all break-all rounded-md border border-line bg-surface px-3 py-2 text-sm"
+          className="min-w-0 flex-1 select-all break-all rounded-lg border border-line bg-paper px-3 py-2 text-[13px]"
         >
           {value}
         </code>
@@ -598,7 +598,7 @@ export function WebDavDialog({
           <CopyRow label="User name" value={drive} />
           <div>
             <p className="text-sm font-medium">Password</p>
-            <div className="mt-1.5 rounded-md border border-brass/50 bg-brass/10 p-4">
+            <div className="mt-1.5 rounded-lg border border-brass/50 bg-brass/10 p-4">
               <p className="select-all break-words text-lg font-medium leading-relaxed tracking-wide">{issued}</p>
             </div>
             <CopyButton text={issued} label="Copy password" className="mt-3" />
@@ -607,7 +607,7 @@ export function WebDavDialog({
           <label className="flex items-start gap-2.5 text-sm">
             <input
               type="checkbox"
-              className="mt-0.5 h-4 w-4"
+              className="mt-0.5"
               checked={saved}
               onChange={(e) => setSaved(e.target.checked)}
             />
@@ -635,7 +635,7 @@ export function WebDavDialog({
             apps like rclone, without the browser.
           </p>
           {insecure && (
-            <p className="flex gap-2 rounded-md border border-danger/40 bg-danger/10 px-3 py-2 text-sm text-danger">
+            <p className="flex gap-2 rounded-lg border border-danger/40 bg-danger/10 px-3 py-2 text-sm text-danger">
               <TriangleAlert size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
               This page is on plain HTTP, so the WebDAV password would cross the network readable by anyone on the
               way. Serve tgdrive over HTTPS before using it.
@@ -683,14 +683,14 @@ export function WebDavDialog({
 
           {(!enabled || confirming) && (
             <form onSubmit={submit} className="space-y-4">
-              <p className="rounded-md border border-brass/50 bg-brass/10 px-3 py-2 text-sm">
+              <p className="rounded-lg border border-brass/50 bg-brass/10 px-3 py-2 text-sm">
                 Anyone with the WebDAV password can open this drive without the master password, even while tgdrive is
                 locked. Turn it off here at any time.
               </p>
               <label className="flex items-start gap-2.5 text-sm">
                 <input
                   type="checkbox"
-                  className="mt-0.5 h-4 w-4"
+                  className="mt-0.5"
                   checked={readOnly}
                   onChange={(e) => setReadOnly(e.target.checked)}
                 />

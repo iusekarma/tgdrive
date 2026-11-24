@@ -401,9 +401,10 @@ channel, a few hundred to a message so they cost almost nothing against
 Telegram's rate limits, and cached on the server.
 
 **Search.** The search box (shortcut `/`) matches file and folder names
-across the whole drive; every word you type must appear in the name. Names
-are decrypted in memory for each search, about half a second per 100,000
-items.
+in the folder you are in and everything below it; **Search whole drive**,
+next to the number of matches, widens it. Every word you type must appear in
+the name. Names are decrypted in memory for each search, about half a second
+per 100,000 items.
 
 **Deleting** removes entries at once; the Telegram messages are deleted in
 the background.
@@ -430,7 +431,7 @@ Interactive docs are served at **http://localhost:8000/api/docs**.
 | POST | `/api/drives/{name}/delete` | Delete the drive and all its files |
 | GET · POST · DELETE | `/api/drives/{name}/webdav` | WebDAV status / turn on or make a new password (`{"password", "read_only"}`; returns it once) / turn off |
 | GET | `/api/drives/{name}/nodes?parent=ID` | List a folder (with breadcrumb path) |
-| GET | `/api/drives/{name}/search?q=X` | Search names across the whole drive |
+| GET | `/api/drives/{name}/search?q=X&parent=ID` | Search names across the whole drive, or with `parent` only under that folder |
 | POST | `/api/drives/{name}/folders` | Create a folder (`"exist_ok": true` returns one already there) |
 | PATCH | `/api/drives/{name}/nodes/{id}` | Rename and/or move |
 | DELETE | `/api/drives/{name}/nodes/{id}` | Delete a file or folder |

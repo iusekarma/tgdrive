@@ -1,5 +1,6 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 
+import Shell from "./components/shell";
 import { UploadsProvider } from "./components/uploads";
 import VaultGate from "./components/VaultGate";
 import BrowserPage from "./pages/BrowserPage";
@@ -10,9 +11,11 @@ export default function App() {
     <UploadsProvider>
       <VaultGate>
         <Routes>
-          <Route path="/" element={<DrivesPage />} />
-          <Route path="/d/:drive" element={<BrowserPage />} />
-          <Route path="/d/:drive/:folderId" element={<BrowserPage />} />
+          <Route element={<Shell />}>
+            <Route path="/" element={<DrivesPage />} />
+            <Route path="/d/:drive" element={<BrowserPage />} />
+            <Route path="/d/:drive/:folderId" element={<BrowserPage />} />
+          </Route>
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </VaultGate>

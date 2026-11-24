@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { HardDrive, KeyRound, Lock, LockOpen, Network, Pencil, Plus, ShieldPlus, Trash2 } from "lucide-react";
+import { ChevronRight, HardDrive, KeyRound, Lock, LockOpen, Network, Pencil, Plus, ShieldPlus, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
@@ -8,7 +8,6 @@ import {
   CreateDriveDialog,
   DeleteDriveDialog,
   DrivePasswordDialog,
-  MasterPasswordDialog,
   RecoveryKeyDialog,
   RenameDriveDialog,
   UnlockDialog,
@@ -16,13 +15,15 @@ import {
   type PasswordAction,
 } from "../components/driveDialogs";
 import LockDial from "../components/LockDial";
-import { Button, ErrorNote, ICON_BUTTON, Menu, MenuItem, PageHeader, useSavedView, ViewToggle } from "../components/ui";
+import { Menu, MenuDivider, MenuItem } from "../components/menu";
+import { Page, Topbar } from "../components/shell";
+import { Button, ErrorNote, useSavedView, ViewToggle } from "../components/ui";
 import { useUploads } from "../components/uploads";
-import { useLockEverything } from "../components/VaultGate";
 import { driveUrl } from "../format";
 import { forgetThumbnails } from "../thumbs";
 
-type RouteState = { unlock?: string; from?: string } | null;
+/** What another page, or the sidebar, came here for. */
+type RouteState = { unlock?: string; from?: string; create?: boolean } | null;
 
 type Open =
   | { type: "unlock"; drive: string; returnTo: string | null }
@@ -31,20 +32,30 @@ type Open =
   | { type: "rename"; drive: string }
   | { type: "delete"; drive: DriveInfo }
   | { type: "recoveryKey"; drive: string; recoveryKey: string; open: boolean }
-  | { type: "masterPassword" }
   | { type: "webdav"; drive: DriveInfo }
   | null;
 
 function status(d: DriveInfo): string {
-  const lock = !d.protected ? "Opens with the master password" : d.unlocked ? "Unlocked" : "Locked";
-  return d.webdav ? `${lock} · WebDAV on` : lock;
+  return !d.protected ? "Opens with the master password" : d.unlocked ? "Unlocked" : "Locked with its own password";
 }
 
 function DriveIcon({ drive }: { drive: DriveInfo }) {
-  if (drive.protected) return <LockDial unlocked={drive.unlocked} />;
+  if (drive.protected) return <LockDial unlocked={drive.unlocked} className="h-11 w-11" />;
   return (
-    <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full border border-line bg-surface">
-      <HardDrive size={22} className="text-teal" aria-hidden="true" />
+    <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full border border-line bg-surface">
+      <HardDrive size={19} className="text-ink/75" aria-hidden="true" />
+    </span>
+  );
+}
+
+function WebDavTag() {
+  return (
+    <span
+      title="Can be mounted over WebDAV"
+      className="inline-flex shrink-0 items-center gap-1.5 rounded-md bg-ink/6 px-2 py-0.5 text-xs text-muted"
+    >
+      <Network size={12} aria-hidden="true" />
+      WebDAV
     </span>
   );
 }
@@ -53,22 +64,22 @@ export default function DrivesPage() {
   const navigate = useNavigate();
   const location = useLocation();
   const queryClient = useQueryClient();
-  const lockEverything = useLockEverything();
   const uploads = useUploads();
-  const [view, changeView] = useSavedView("tgdrive.drivesView");
+  const [view, changeView] = useSavedView("tgdrive.drivesView", "grid");
   const routeState = location.state as RouteState;
 
-  // Arriving here from a drive whose session expired opens its unlock dialog straight away.
-  const [open, setOpen] = useState<Open>(
-    routeState?.unlock ? { type: "unlock", drive: routeState.unlock, returnTo: routeState.from ?? null } : null,
-  );
+  const [open, setOpen] = useState<Open>(null);
   const close = () => setOpen(null);
 
-  // The request to unlock is used once; a reload should not reopen the dialog.
+  // Arriving here from a drive whose session expired opens its unlock dialog straight away,
+  // and the sidebar asks for one this way too, even from this page. The request is used once;
+  // a reload should not reopen the dialog.
   useEffect(() => {
-    if (routeState) navigate("/", { replace: true, state: null });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    if (!routeState) return;
+    if (routeState.unlock) setOpen({ type: "unlock", drive: routeState.unlock, returnTo: routeState.from ?? null });
+    else if (routeState.create) setOpen({ type: "create" });
+    navigate("/", { replace: true, state: null });
+  }, [routeState, navigate]);
 
   const drives = useQuery({ queryKey: ["drives"], queryFn: api.drives });
   const refreshDrives = () => queryClient.invalidateQueries({ queryKey: ["drives"] });
@@ -133,6 +144,7 @@ export default function DrivesPage() {
                 <Network size={16} />
                 WebDAV access
               </MenuItem>
+              <MenuDivider />
               <MenuItem danger onSelect={pick({ type: "delete", drive: d })}>
                 <Trash2 size={16} />
                 Delete drive
@@ -144,105 +156,111 @@ export default function DrivesPage() {
     );
   }
 
+  const list = drives.data ?? [];
+  /** Covers its card or row, so anywhere on it opens the drive. */
+  const cover = "outline-none after:absolute after:inset-0 after:rounded-[inherit] focus-visible:after:outline-2 focus-visible:after:outline-accent";
+
   return (
     <>
-      <PageHeader>
-        <Button onClick={() => void lockEverything()}>
-          <Lock size={16} />
-          Lock
-        </Button>
-        <Menu label="Settings">
-          {(closeMenu) => (
-            <MenuItem
-              onSelect={() => {
-                closeMenu();
-                setOpen({ type: "masterPassword" });
-              }}
-            >
-              <KeyRound size={16} />
-              Change master password
-            </MenuItem>
-          )}
-        </Menu>
-      </PageHeader>
-
-      <main className="mx-auto max-w-4xl px-5 pb-24 pt-10">
-        <div className="flex flex-wrap items-end justify-between gap-4">
-          <div>
-            <h1 className="text-4xl font-semibold tracking-tight sm:text-5xl">Drives</h1>
-            <p className="mt-3 max-w-prose text-muted">
-              Every drive is encrypted, and the files live in your Telegram channel, where they are unreadable without
-              your keys. A drive can also have its own password.
-            </p>
-          </div>
-          <div className="flex items-center gap-2">
-            <ViewToggle view={view} onChange={changeView} />
-            <Button variant="primary" onClick={() => setOpen({ type: "create" })}>
-              <Plus size={16} />
-              Create drive
-            </Button>
-          </div>
+      <Page>
+        {/* Only for the way to the sidebar; on wide screens it's there already. */}
+        <div className="contents lg:hidden">
+          <Topbar>
+            <span className="px-1 text-[15px] font-semibold tracking-tight">tgdrive</span>
+          </Topbar>
         </div>
 
-        <div className="mt-10">
-          {drives.isPending && <p className="text-muted">Loading drives…</p>}
-          {drives.error && <ErrorNote>{drives.error.message}</ErrorNote>}
-          {drives.data?.length === 0 && (
-            <p className="border-y border-line py-10 text-muted">No drives yet. Create one to start storing files.</p>
-          )}
-          {drives.data && drives.data.length > 0 && view === "list" && (
-            <ul className="divide-y divide-line border-y border-line">
-              {drives.data.map((d) => (
-                <li key={d.name} className="flex items-center gap-1 pr-1 hover:bg-ink/[0.03]">
-                  <button
-                    type="button"
-                    onClick={() => openDrive(d)}
-                    className="flex min-w-0 flex-1 items-center gap-5 px-1 py-5 text-left"
-                  >
+        <main className="mx-auto w-full max-w-6xl shrink-0 px-4 pb-24 pt-6 @3xl:px-8 lg:pt-9">
+          <div className="flex items-center justify-between gap-4">
+            <h1 className="text-2xl font-semibold tracking-tight">Drives</h1>
+            <div className="flex shrink-0 items-center gap-2">
+              <ViewToggle view={view} onChange={changeView} />
+              <Button variant="primary" onClick={() => setOpen({ type: "create" })}>
+                <Plus size={16} aria-hidden="true" />
+                Create drive
+              </Button>
+            </div>
+          </div>
+          <p className="mt-1.5 max-w-3xl text-pretty text-sm leading-relaxed text-muted">
+            Every drive is encrypted before it leaves this server, so Telegram only ever holds what it can't read.
+          </p>
+
+          <div className="mt-6">
+            {drives.isPending && <p className="text-sm text-muted">Loading drives…</p>}
+            {drives.error && <ErrorNote>{drives.error.message}</ErrorNote>}
+            {drives.data?.length === 0 && (
+              <div className="flex flex-col items-center rounded-2xl border border-dashed border-line px-6 py-16 text-center">
+                <HardDrive size={28} className="text-muted" aria-hidden="true" />
+                <p className="mt-4 text-sm font-medium">No drives yet</p>
+                <p className="mb-5 mt-1 text-sm text-muted">Create one to start storing files.</p>
+                <Button variant="primary" onClick={() => setOpen({ type: "create" })}>
+                  Create drive
+                </Button>
+              </div>
+            )}
+            {list.length > 0 && view === "list" && (
+              <ul className="divide-y divide-line border-y border-line">
+                {list.map((d) => (
+                  <li key={d.name} className="relative flex items-center gap-4 px-2 py-3.5 hover:bg-ink/3">
                     <DriveIcon drive={d} />
                     <span className="min-w-0 flex-1">
-                      <span className="block truncate text-2xl font-semibold tracking-tight">{d.name}</span>
-                      <span className="block text-sm text-muted">{status(d)}</span>
+                      <button
+                        type="button"
+                        onClick={() => openDrive(d)}
+                        className={`block max-w-full truncate text-left text-[15px] font-medium ${cover}`}
+                      >
+                        {d.name}
+                      </button>
+                      <span className={`block truncate text-[13px] ${d.unlocked ? "text-muted" : "text-brass"}`}>{status(d)}</span>
                     </span>
-                    <span className="text-sm font-medium text-teal">{d.unlocked ? "Open" : "Unlock"}</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setOpen({ type: "delete", drive: d })}
-                    aria-label={`Delete ${d.name}`}
-                    title="Delete drive"
-                    className={`${ICON_BUTTON} hover:text-danger`}
-                  >
-                    <Trash2 size={18} />
-                  </button>
-                  {driveMenu(d)}
-                </li>
-              ))}
-            </ul>
-          )}
-          {drives.data && drives.data.length > 0 && view === "grid" && (
-            <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2 md:grid-cols-3">
-              {drives.data.map((d) => (
-                <li key={d.name} className="relative rounded-xl border border-line bg-surface hover:border-muted">
-                  <button
-                    type="button"
-                    onClick={() => openDrive(d)}
-                    className="flex w-full flex-col items-start gap-4 rounded-xl p-5 text-left"
-                  >
-                    <DriveIcon drive={d} />
-                    <span className="block w-full min-w-0">
-                      <span className="block truncate text-xl font-semibold tracking-tight">{d.name}</span>
-                      <span className="block truncate text-sm text-muted">{status(d)}</span>
+                    {d.webdav && <WebDavTag />}
+                    <span className="hidden text-[13px] text-muted @lg:block" aria-hidden="true">
+                      {d.unlocked ? "Open" : "Unlock"}
                     </span>
-                    <span className="text-sm font-medium text-teal">{d.unlocked ? "Open" : "Unlock"}</span>
-                  </button>
-                  <span className="absolute right-2 top-2">{driveMenu(d)}</span>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-      </main>
+                    <span className="relative z-[1]">{driveMenu(d)}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {list.length > 0 && view === "grid" && (
+              <ul className="grid grid-cols-[repeat(auto-fill,minmax(16rem,1fr))] gap-3">
+                {list.map((d) => (
+                  <li
+                    key={d.name}
+                    className="group relative flex flex-col @lg:min-h-40 rounded-2xl border border-line p-4 transition-colors hover:border-ink/25 hover:bg-surface"
+                  >
+                    <span className="flex items-start justify-between">
+                      <DriveIcon drive={d} />
+                      <span className="relative z-[1] -mr-1.5 -mt-1.5">{driveMenu(d)}</span>
+                    </span>
+                    <span className="mt-auto block min-w-0 pt-4">
+                      <button
+                        type="button"
+                        onClick={() => openDrive(d)}
+                        className={`block max-w-full truncate text-left text-[15px] font-medium ${cover}`}
+                      >
+                        {d.name}
+                      </button>
+                      <span className="mt-0.5 flex h-5 items-center justify-between gap-2">
+                        <span className={`truncate text-[13px] ${d.unlocked ? "text-muted" : "text-brass"}`}>{status(d)}</span>
+                        {d.webdav ? (
+                          <WebDavTag />
+                        ) : (
+                          <ChevronRight
+                            size={16}
+                            className="shrink-0 text-muted opacity-0 transition-opacity group-hover:opacity-100"
+                            aria-hidden="true"
+                          />
+                        )}
+                      </span>
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </main>
+      </Page>
 
       {open?.type === "unlock" && (
         <UnlockDialog
@@ -315,7 +333,6 @@ export default function DrivesPage() {
           }}
         />
       )}
-      {open?.type === "masterPassword" && <MasterPasswordDialog onClose={close} />}
       {open?.type === "webdav" && (
         <WebDavDialog
           drive={open.drive.name}

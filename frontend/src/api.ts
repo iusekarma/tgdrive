@@ -190,8 +190,12 @@ export const api = {
 
   list: (drive: string, parent: string | null) =>
     request<Listing>("GET", `${drivePath(drive)}/nodes${parent ? `?parent=${encodeURIComponent(parent)}` : ""}`),
-  search: (drive: string, q: string) =>
-    request<SearchResults>("GET", `${drivePath(drive)}/search?${new URLSearchParams({ q }).toString()}`),
+  /** Everything under the folder `parent`, or the whole drive. */
+  search: (drive: string, q: string, parent: string | null) =>
+    request<SearchResults>(
+      "GET",
+      `${drivePath(drive)}/search?${new URLSearchParams(parent ? { q, parent } : { q }).toString()}`,
+    ),
   /** With `existOk`, a folder already of that name is returned instead of an error. */
   createFolder: (drive: string, parent: string | null, name: string, existOk = false) =>
     request<Entry>("POST", `${drivePath(drive)}/folders`, { name, parent_id: parent, exist_ok: existOk }),

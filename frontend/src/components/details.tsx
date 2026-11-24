@@ -30,7 +30,7 @@ const KIND_ICONS: Record<PreviewKind, LucideIcon> = {
 
 /** The icon for a folder, or for a file by what the viewer would make of it. */
 export function KindIcon({ entry, size, className = "" }: { entry: Entry; size: number; className?: string }) {
-  if (entry.kind === "dir") return <Folder size={size} className={`text-brass ${className}`} aria-hidden="true" />;
+  if (entry.kind === "dir") return <Folder size={size} className={`fill-current text-muted ${className}`} aria-hidden="true" />;
   const kind = previewKind(entry.name, entry.size);
   const Icon = kind ? KIND_ICONS[kind] : FileIcon;
   return <Icon size={size} className={`text-muted ${className}`} aria-hidden="true" />;
@@ -50,7 +50,7 @@ function Picture({ drive, entry }: { drive: string; entry: Entry }) {
     };
   }, [drive, entry.id, entry.thumb, wanted, version]);
   return (
-    <div className="flex aspect-video w-full items-center justify-center overflow-hidden rounded-lg bg-ink/[0.04]">
+    <div className="flex aspect-video w-full items-center justify-center overflow-hidden rounded-xl bg-ink/5">
       {url ? <img src={url} alt="" className="h-full w-full object-contain" /> : <KindIcon entry={entry} size={44} />}
     </div>
   );
@@ -58,7 +58,7 @@ function Picture({ drive, entry }: { drive: string; entry: Entry }) {
 
 function Row({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <div className="grid grid-cols-[6.5rem_1fr] gap-3 py-1.5">
+    <div className="grid grid-cols-[6rem_1fr] gap-3 py-2">
       <dt className="text-muted">{label}</dt>
       <dd className="min-w-0 break-words">{children}</dd>
     </div>
@@ -80,8 +80,8 @@ export function EntryDetails({ drive, entry, location }: { drive: string; entry:
   return (
     <div>
       <Picture drive={drive} entry={entry} />
-      <h3 className="mt-3 break-words font-medium">{entry.name}</h3>
-      <dl className="mt-2 text-sm">
+      <h3 className="mt-4 break-words text-sm font-medium">{entry.name}</h3>
+      <dl className="mt-3 divide-y divide-line border-y border-line text-[13px]">
         <Row label="Type">{entry.kind === "dir" ? "Folder" : typeName(entry.name, entry.size)}</Row>
         {entry.kind === "file" && (
           <Row label="Size">
@@ -118,11 +118,11 @@ function Summary({ title, entries, note }: { title: string; entries: Entry[]; no
   const plural = (n: number, one: string) => `${n.toLocaleString()} ${one}${n === 1 ? "" : "s"}`;
   return (
     <div>
-      <div className="flex aspect-video w-full items-center justify-center rounded-lg bg-ink/[0.04]">
-        <Folder size={44} className="text-brass" aria-hidden="true" />
+      <div className="flex aspect-video w-full items-center justify-center rounded-xl bg-ink/5">
+        <Folder size={44} className="fill-current text-muted" aria-hidden="true" />
       </div>
-      <h3 className="mt-3 break-words font-medium">{title}</h3>
-      <dl className="mt-2 text-sm">
+      <h3 className="mt-4 break-words text-sm font-medium">{title}</h3>
+      <dl className="mt-3 divide-y divide-line border-y border-line text-[13px]">
         <Row label="Files">{plural(files.length, "file")}</Row>
         <Row label="Folders">{plural(folders, "folder")}</Row>
         <Row label="Size">{formatSize(files.reduce((sum, e) => sum + e.size, 0))}</Row>
@@ -152,10 +152,10 @@ export function DetailsPanel({
   return (
     <aside
       aria-label="Details"
-      className="sticky top-0 hidden h-screen w-80 shrink-0 self-start overflow-y-auto border-l border-line px-5 py-5 xl:block"
+      className="hidden w-80 shrink-0 overflow-y-auto border-l border-line px-5 pb-5 xl:block"
     >
-      <div className="mb-4 flex items-center justify-between">
-        <h2 className="text-sm font-medium uppercase tracking-wide text-muted">Details</h2>
+      <div className="sticky top-0 z-10 -mx-5 mb-4 flex h-14 items-center justify-between border-b border-line bg-paper pl-5 pr-3">
+        <h2 className="text-sm font-medium">Details</h2>
         <button type="button" onClick={onClose} aria-label="Hide details" title="Hide details" className={ICON_BUTTON}>
           <X size={16} />
         </button>

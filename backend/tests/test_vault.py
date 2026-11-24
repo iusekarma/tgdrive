@@ -10,7 +10,7 @@ from pathlib import Path
 from PIL import Image
 
 from app import crypto, db, thumbs
-from app.storage import Conflict, NoVault, Storage, StorageError
+from app.storage import Conflict, NotFound, NoVault, Storage, StorageError
 from app.transport.base import BlobRef
 from app.transport.local import LocalTransport
 from app.transport.telegram import TelegramTransport
@@ -454,6 +454,31 @@ class SearchTest(Base):
 
         other, _ = await s.create_drive(self.vault, "other", None)
         self.assertEqual(s.search(other, "beach"), ([], 0))
+
+    async def test_search_one_folder(self):
+        s, d = self.store, self.drive
+        trips = s.mkdir(d, None, "Beach trips")
+        italy = s.mkdir(d, trips, "Italy")
+        empty = s.mkdir(d, None, "Empty")
+        deep = await s.upload(d, italy, "Rome beach.jpg", gen(b"x"))
+        await s.upload(d, trips, "beach.png", gen(b"x"))
+        outside = await s.upload(d, None, "beach.jpg", gen(b"x"))
+
+        # Everything below it at any depth, but not the folder itself.
+        results, total = s.search(d, "beach", parent_id=trips)
+        self.assertEqual(([e.name for e, _ in results], total), (["beach.png", "Rome beach.jpg"], 2))
+        # Paths still start at the top of the drive.
+        self.assertEqual(results[1][1], [(trips, "Beach trips"), (italy, "Italy")])
+        self.assertEqual([(e.id, p) for e, p in s.search(d, "beach", parent_id=italy)[0]],
+                         [(deep, [(trips, "Beach trips"), (italy, "Italy")])])
+        self.assertEqual(s.search(d, "beach", parent_id=empty), ([], 0))
+        self.assertEqual(s.search(d, "beach")[1], 4)
+
+        with self.assertRaises(StorageError):
+            s.search(d, "beach", parent_id=outside)
+        other, _ = await s.create_drive(self.vault, "other", None)
+        with self.assertRaises(NotFound):
+            s.search(other, "beach", parent_id=trips)
 
 
 if __name__ == "__main__":

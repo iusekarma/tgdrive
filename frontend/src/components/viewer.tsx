@@ -11,31 +11,13 @@ import {
 import { api, type Entry, type FileInfo } from "../api";
 import { seconds, useLearn } from "../fileinfo";
 import { formatDate, formatSize, isConvertedImage, isTransportStream, previewKind } from "../format";
+import { useSavedFlag } from "../saved";
 import { frameTime, sendFrame, sendPicture, sendVideoFrame } from "../thumbs";
 import { byName, junk, listZip, pageType, readZipEntry, zipEntryStart, type ZipEntry } from "../zip";
 import { EntryDetails } from "./details";
 
-const DARK_BUTTON = "inline-flex rounded-md p-2 text-white/75 hover:bg-white/10 hover:text-white";
+const DARK_BUTTON = "inline-flex rounded-lg p-2 text-white/75 hover:bg-white/10 hover:text-white";
 const INFO_KEY = "tgdrive.viewerInfo";
-
-function useSavedFlag(key: string): [boolean, (on: boolean) => void] {
-  const [on, setOn] = useState(() => {
-    try {
-      return localStorage.getItem(key) === "1";
-    } catch {
-      return false;
-    }
-  });
-  function change(next: boolean) {
-    setOn(next);
-    try {
-      localStorage.setItem(key, next ? "1" : "0");
-    } catch {
-      /* private mode: the choice just isn't remembered */
-    }
-  }
-  return [on, change];
-}
 
 /** A spinner, with how far along it is when the size is known. */
 function Loading({ label = "Loading…", loaded, total }: { label?: string; loaded?: number; total?: number }) {
@@ -53,7 +35,7 @@ function Loading({ label = "Loading…", loaded, total }: { label?: string; load
       {pct !== null && (
         <>
           <span className="h-1 w-full overflow-hidden rounded-full bg-white/10">
-            <span className="block h-full rounded-full bg-[var(--teal)] transition-[width]" style={{ width: `${pct}%` }} />
+            <span className="block h-full rounded-full bg-[var(--accent)] transition-[width]" style={{ width: `${pct}%` }} />
           </span>
           <span className="text-xs tabular-nums text-white/50">
             {formatSize(loaded!)} of {formatSize(total!)}
@@ -442,7 +424,7 @@ function ArchivePreview({
               onClick={() => setHere(path)}
               className="flex w-full items-center gap-3 px-4 py-2 text-left text-sm hover:bg-ink/5"
             >
-              <Folder size={18} className="shrink-0 text-brass" aria-hidden="true" />
+              <Folder size={18} className="shrink-0 fill-current text-muted" aria-hidden="true" />
               <span className="min-w-0 flex-1 truncate font-medium">{baseName(path)}</span>
             </button>
           </li>
@@ -938,7 +920,7 @@ function ZipReader({
             value={current + 1}
             onChange={(e) => jump(Number(e.target.value) - 1)}
             aria-label="Page"
-            className="min-w-0 flex-1 accent-[var(--teal)]"
+            className="min-w-0 flex-1 accent-[var(--accent)]"
           />
           <span className="w-20 shrink-0 text-center tabular-nums">
             {current + 1} / {items.length}
@@ -1114,7 +1096,7 @@ function Stage({
           onLoad={() => setFramed(true)}
         />
         {!pdfInMemory && !framed && (
-          <div className="absolute inset-0 flex items-center justify-center bg-neutral-950">
+          <div className="absolute inset-0 flex items-center justify-center bg-[#0f0f0f]">
             <Loading />
           </div>
         )}
@@ -1194,7 +1176,7 @@ export function Viewer({
 
   const kind = previewKind(entry.name, entry.size);
   const swipeable = kind === "image" || kind === "audio" || kind === "comic" || kind === "archive";
-  const arrow = `absolute top-1/2 -translate-y-1/2 rounded-full bg-black/50 p-2 text-white/80 hover:bg-black/70 hover:text-white ${fade(idle)}`;
+  const arrow = `absolute top-1/2 -translate-y-1/2 rounded-full border border-white/10 bg-black/55 p-2.5 text-white/80 hover:bg-black/70 hover:text-white ${fade(idle)}`;
 
   return (
     <dialog
@@ -1207,7 +1189,7 @@ export function Viewer({
       onKeyDown={onKeyDown}
       onPointerMove={wake}
       onPointerDown={wake}
-      className="m-0 h-dvh max-h-none w-dvw max-w-none flex-col bg-neutral-950 open:flex p-0 text-white backdrop:bg-black"
+      className="m-0 h-dvh max-h-none w-dvw max-w-none flex-col bg-[#0f0f0f] open:flex p-0 text-white backdrop:bg-black"
     >
       <header className="flex shrink-0 items-center gap-2 border-b border-white/10 px-3 py-2">
         <div className="min-w-0 flex-1 pl-1">

@@ -1,18 +1,36 @@
 import { useQuery } from "@tanstack/react-query";
-import { ChevronRight, Folder, HardDrive, LayoutGrid, LocateFixed, Lock } from "lucide-react";
+import {
+  ChevronRight,
+  Folder,
+  HardDrive,
+  KeyRound,
+  LayoutGrid,
+  LocateFixed,
+  Lock,
+  PanelLeft,
+  Plus,
+  Settings,
+  X,
+} from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useMatch, useNavigate } from "react-router-dom";
 
-import { api, type Crumb, type DriveInfo } from "../api";
+import { api, type DriveInfo } from "../api";
 import { driveUrl } from "../format";
+import { useTheme } from "../theme";
+import { Mark } from "./LockDial";
+import { Menu, MenuDivider, MenuHeading, MenuItem } from "./menu";
+import { ICON_BUTTON, Segmented } from "./ui";
+import { useLockEverything } from "./VaultGate";
 
 /** Tree rows are keyed by drive and folder; a drive's own row uses an empty folder id. */
 const key = (drive: string, id: string | null) => `${drive}\n${id ?? ""}`;
 
-const ROW = "flex min-w-0 flex-1 items-center gap-2 rounded-md py-1.5 pr-2 text-sm";
+const ROW = "flex h-8 min-w-0 flex-1 items-center gap-2.5 rounded-lg pr-2 text-sm transition-colors";
+const state = (here: boolean) => (here ? "bg-ink/9 text-ink" : "text-ink/75 hover:bg-ink/5 hover:text-ink");
 
-/** The folder being viewed, and a count bumped each time it is asked to be shown. */
-type Current = { drive: string; folder: string | null; reveal: number };
+/** The folder being viewed (no drive on the drives page), and a count bumped each time it is asked to be shown. */
+type Current = { drive: string | null; folder: string | null; reveal: number };
 
 /** Scrolls the current row into view once it is asked to be shown. The row may
  * only appear after its parents load, so this also runs when it mounts. */
@@ -42,7 +60,7 @@ function Toggle({
       aria-expanded={expanded}
       aria-label={`${expanded ? "Collapse" : "Expand"} ${label}`}
       onClick={onToggle}
-      className="inline-flex w-6 shrink-0 justify-center rounded py-1.5 text-muted hover:bg-ink/5 hover:text-ink"
+      className="inline-flex h-8 w-6 shrink-0 items-center justify-center rounded-md text-muted hover:text-ink"
     >
       <ChevronRight size={14} className={`transition-transform ${expanded ? "rotate-90" : ""}`} />
     </button>
@@ -69,7 +87,7 @@ function Folders({
   const listing = useQuery({ queryKey: ["nodes", drive, parent], queryFn: () => api.list(drive, parent) });
   if (listing.isPending) {
     return (
-      <p className="py-1 text-xs text-muted" style={{ paddingLeft: depth * 14 + 28 }}>
+      <p className="py-1.5 text-xs text-muted" style={{ paddingLeft: depth * 14 + 28 }}>
         Loading…
       </p>
     );
@@ -77,7 +95,7 @@ function Folders({
   if (listing.error) return null;
   const folders = listing.data.entries.filter((e) => e.kind === "dir");
   return (
-    <ul>
+    <ul className="space-y-px pt-px">
       {folders.map((f) => (
         <FolderRow
           key={f.id}
@@ -126,9 +144,9 @@ function FolderRow({
           to={driveUrl(drive, id)}
           aria-current={here ? "page" : undefined}
           title={name}
-          className={`${ROW} pl-1 ${here ? "bg-teal/10 font-medium text-ink" : "text-ink hover:bg-ink/5"}`}
+          className={`${ROW} pl-1.5 ${state(here)}`}
         >
-          <Folder size={15} className="shrink-0 text-brass" aria-hidden="true" />
+          <Folder size={15} className="shrink-0 fill-current opacity-55" aria-hidden="true" />
           <span className="truncate">{name}</span>
         </Link>
       </div>
@@ -145,6 +163,17 @@ function FolderRow({
     </li>
   );
 }
+
+function DriveIcon({ drive }: { drive: DriveInfo }) {
+  return drive.unlocked ? (
+    <HardDrive size={16} className="shrink-0 opacity-70" aria-hidden="true" />
+  ) : (
+    <Lock size={16} className="shrink-0 text-brass" aria-hidden="true" />
+  );
+}
+
+/** The drives page asks for the password, then opens it. */
+const unlockState = (drive: string) => ({ state: { unlock: drive } });
 
 function DriveRow({
   drive,
@@ -164,15 +193,11 @@ function DriveRow({
   const ref = useReveal<HTMLDivElement>(here, current.reveal);
   const label = (
     <>
-      {drive.unlocked ? (
-        <HardDrive size={15} className="shrink-0 text-teal" aria-hidden="true" />
-      ) : (
-        <Lock size={15} className="shrink-0 text-brass" aria-hidden="true" />
-      )}
+      <DriveIcon drive={drive} />
       <span className="truncate">{drive.name}</span>
     </>
   );
-  const style = `${ROW} pl-1 ${here ? "bg-teal/10 font-medium text-ink" : "text-ink hover:bg-ink/5"}`;
+  const style = `${ROW} pl-1.5 ${state(here)}`;
   return (
     <li>
       <div ref={ref} className="flex items-center">
@@ -191,11 +216,10 @@ function DriveRow({
         ) : (
           <>
             <span className="w-6 shrink-0" aria-hidden="true" />
-            {/* The drives page asks for the password, then opens it. */}
             <button
               type="button"
               title={`Unlock ${drive.name}`}
-              onClick={() => navigate("/", { state: { unlock: drive.name } })}
+              onClick={() => navigate("/", unlockState(drive.name))}
               className={`${style} text-left`}
             >
               {label}
@@ -210,10 +234,96 @@ function DriveRow({
   );
 }
 
-/** Every drive, and the folder tree of the unlocked ones. Folders open only
- * when their arrow is pressed; "Show current folder" opens the tree down to
- * the folder being viewed. */
-export default function Sidebar({ drive, folder, path }: { drive: string; folder: string | null; path: Crumb[] }) {
+/** One drive in the rail: its icon, with its name as a tooltip. */
+function RailDrive({ drive, here }: { drive: DriveInfo; here: boolean }) {
+  const navigate = useNavigate();
+  const style = `flex h-9 w-9 items-center justify-center rounded-lg transition-colors ${state(here)}`;
+  return drive.unlocked ? (
+    <Link
+      to={driveUrl(drive.name)}
+      title={drive.name}
+      aria-label={drive.name}
+      aria-current={here ? "page" : undefined}
+      className={style}
+    >
+      <DriveIcon drive={drive} />
+    </Link>
+  ) : (
+    <button
+      type="button"
+      title={`Unlock ${drive.name}`}
+      aria-label={`Unlock ${drive.name}`}
+      onClick={() => navigate("/", unlockState(drive.name))}
+      className={style}
+    >
+      <DriveIcon drive={drive} />
+    </button>
+  );
+}
+
+function SettingsMenu({ onMasterPassword }: { onMasterPassword: () => void }) {
+  const [theme, setTheme] = useTheme();
+  return (
+    <Menu label="Settings" align="start" width="w-60" trigger={<Settings size={17} aria-hidden="true" />}>
+      {(close) => (
+        <>
+          <MenuHeading>Appearance</MenuHeading>
+          <Segmented
+            label="Appearance"
+            className="mx-2 mb-1.5"
+            value={theme}
+            onChange={setTheme}
+            options={[
+              { value: "system", label: "System" },
+              { value: "light", label: "Light" },
+              { value: "dark", label: "Dark" },
+            ]}
+          />
+          <MenuDivider />
+          <MenuItem
+            onSelect={() => {
+              close();
+              onMasterPassword();
+            }}
+          >
+            <KeyRound size={16} />
+            Change master password
+          </MenuItem>
+        </>
+      )}
+    </Menu>
+  );
+}
+
+/**
+ * On every page: all drives, the folder tree of the unlocked ones, and, at the
+ * foot, locking everything and the settings. Folders open only when their
+ * arrow is pressed; "Show current folder" opens the tree down to the folder
+ * being viewed. As a rail (`rail`) it shows only icons; in a drawer (`onClose`), all of it.
+ */
+export default function Sidebar({
+  rail = false,
+  onToggleRail,
+  onClose,
+  onMasterPassword,
+}: {
+  rail?: boolean;
+  onToggleRail?: () => void;
+  onClose?: () => void;
+  onMasterPassword: () => void;
+}) {
+  const navigate = useNavigate();
+  const lockEverything = useLockEverything();
+  const inFolder = useMatch("/d/:drive/:folderId");
+  const inDrive = useMatch("/d/:drive");
+  const drive = (inFolder ?? inDrive)?.params.drive ?? null;
+  const folder = inFolder?.params.folderId ?? null;
+  // The page's own listing, shared through the cache: the folders above the one being viewed.
+  const listing = useQuery({
+    queryKey: ["nodes", drive, folder],
+    queryFn: () => api.list(drive ?? "", folder),
+    enabled: drive !== null,
+  });
   const drives = useQuery({ queryKey: ["drives"], queryFn: api.drives });
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const [reveal, setReveal] = useState(0);
@@ -221,7 +331,9 @@ export default function Sidebar({ drive, folder, path }: { drive: string; folder
   // Opens the drive and every folder above the one being viewed; the viewed
   // folder itself stays as it was.
   function showCurrent() {
-    const wanted = [key(drive, null), ...path.slice(0, -1).map((c) => key(drive, c.id))];
+    if (drive === null) return;
+    const above = (listing.data?.path ?? []).slice(0, -1);
+    const wanted = folder === null ? [] : [key(drive, null), ...above.map((c) => key(drive, c.id))];
     setExpanded((prev) => (wanted.every((k) => prev.has(k)) ? prev : new Set([...prev, ...wanted])));
     setReveal((n) => n + 1);
   }
@@ -234,35 +346,134 @@ export default function Sidebar({ drive, folder, path }: { drive: string; folder
     });
   }
 
-  const current = { drive, folder, reveal };
+  const createDrive = () => navigate("/", { state: { create: true } });
+  const home = drive === null;
+
+  if (rail) {
+    return (
+      <nav aria-label="Drives" className="flex h-full w-full flex-col items-center gap-1 px-2 py-3">
+        <button
+          type="button"
+          onClick={onToggleRail}
+          aria-label="Expand sidebar"
+          title="Expand sidebar"
+          className="group mb-3 inline-flex h-9 w-9 items-center justify-center rounded-lg text-ink hover:bg-ink/6"
+        >
+          <span className="group-hover:hidden group-focus-visible:hidden">
+            <Mark />
+          </span>
+          <PanelLeft size={17} className="hidden group-hover:block group-focus-visible:block" aria-hidden="true" />
+        </button>
+        <Link
+          to="/"
+          title="All drives"
+          aria-label="All drives"
+          aria-current={home ? "page" : undefined}
+          className={`flex h-9 w-9 items-center justify-center rounded-lg transition-colors ${state(home)}`}
+        >
+          <LayoutGrid size={16} className="opacity-70" aria-hidden="true" />
+        </Link>
+        <span className="my-2 h-px w-6 bg-line" />
+        <div className="no-scrollbar flex min-h-0 flex-1 flex-col items-center gap-1 overflow-y-auto">
+          {drives.data?.map((d) => <RailDrive key={d.name} drive={d} here={drive === d.name} />)}
+        </div>
+        <button
+          type="button"
+          onClick={() => void lockEverything()}
+          aria-label="Lock tgdrive"
+          title="Lock tgdrive"
+          className={ICON_BUTTON}
+        >
+          <Lock size={17} aria-hidden="true" />
+        </button>
+        <SettingsMenu onMasterPassword={onMasterPassword} />
+      </nav>
+    );
+  }
+
   return (
-    <nav aria-label="Drives" className="space-y-4 px-3 py-6">
-      <Link
-        to="/"
-        className="flex items-center gap-2 rounded-md px-2 py-1.5 text-sm font-medium text-ink hover:bg-ink/5"
-      >
-        <LayoutGrid size={15} className="shrink-0 text-muted" aria-hidden="true" />
-        All drives
-      </Link>
-      <div>
-        <div className="flex items-center justify-between pb-1 pl-2">
-          <h2 className="text-xs font-medium uppercase tracking-wide text-muted">Drives</h2>
+    <nav aria-label="Drives" className="flex h-full w-full flex-col">
+      <div className="flex h-16 shrink-0 items-center justify-between pl-5 pr-3">
+        <Link to="/" className="flex items-center gap-2.5 rounded-md text-[15px] font-semibold tracking-tight">
+          <Mark />
+          tgdrive
+        </Link>
+        {onToggleRail && (
           <button
             type="button"
-            title="Show current folder"
-            aria-label="Show current folder in tree"
-            onClick={showCurrent}
-            className="rounded p-1 text-muted hover:bg-ink/5 hover:text-ink"
+            onClick={onToggleRail}
+            aria-label="Collapse sidebar"
+            title="Collapse sidebar"
+            className={ICON_BUTTON}
           >
-            <LocateFixed size={14} aria-hidden="true" />
+            <PanelLeft size={17} aria-hidden="true" />
           </button>
-        </div>
-        {drives.isPending && <p className="px-2 text-sm text-muted">Loading…</p>}
-        <ul>
+        )}
+        {onClose && (
+          <button type="button" onClick={onClose} aria-label="Close navigation" className={ICON_BUTTON}>
+            <X size={18} aria-hidden="true" />
+          </button>
+        )}
+      </div>
+
+      <div className="px-3">
+        <Link to="/" aria-current={home ? "page" : undefined} className={`${ROW} pl-2.5 ${state(home)}`}>
+          <LayoutGrid size={16} className="shrink-0 opacity-70" aria-hidden="true" />
+          All drives
+        </Link>
+      </div>
+
+      <div className="mt-6 flex items-center justify-between pb-1 pl-5 pr-3">
+        <h2 className="text-xs text-muted">Drives</h2>
+        <span className="flex">
+          {folder !== null && (
+            <button
+              type="button"
+              title="Show current folder"
+              aria-label="Show current folder in tree"
+              onClick={showCurrent}
+              className={`${ICON_BUTTON} !h-7 !w-7`}
+            >
+              <LocateFixed size={14} aria-hidden="true" />
+            </button>
+          )}
+          <button
+            type="button"
+            title="Create drive"
+            aria-label="Create drive"
+            onClick={createDrive}
+            className={`${ICON_BUTTON} !h-7 !w-7`}
+          >
+            <Plus size={15} aria-hidden="true" />
+          </button>
+        </span>
+      </div>
+      <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-4">
+        {drives.isPending && <p className="px-2.5 py-1 text-sm text-muted">Loading…</p>}
+        <ul className="space-y-px">
           {drives.data?.map((d) => (
-            <DriveRow key={d.name} drive={d} current={current} expanded={expanded} onToggle={toggle} />
+            <DriveRow
+              key={d.name}
+              drive={d}
+              current={{ drive, folder, reveal }}
+              expanded={expanded}
+              onToggle={toggle}
+            />
           ))}
         </ul>
+      </div>
+
+      <div className="flex shrink-0 items-center gap-1 p-3">
+        <button
+          type="button"
+          onClick={() => void lockEverything()}
+          className={`${ROW} pl-2.5 ${state(false)}`}
+          title="Lock every drive and ask for the master password again"
+        >
+          <Lock size={16} className="shrink-0 opacity-70" aria-hidden="true" />
+          Lock tgdrive
+        </button>
+        <SettingsMenu onMasterPassword={onMasterPassword} />
       </div>
     </nav>
   );

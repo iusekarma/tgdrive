@@ -502,20 +502,31 @@ class Storage:
             out += self.walk(drive, child.id, path + "/")
         return out
 
-    def search(self, drive: Drive, query: str, limit: int = 200) -> tuple[list[tuple[Entry, list[tuple[str, str]]]], int]:
-        """Case-insensitive; every word must appear in the name. Names are
-        encrypted, so this decrypts the drive's names in memory: about
+    def search(self, drive: Drive, query: str, limit: int = 200,
+               parent_id: str | None = None) -> tuple[list[tuple[Entry, list[tuple[str, str]]]], int]:
+        """Case-insensitive; every word must appear in the name. Looks through
+        everything under `parent_id`, at any depth, or the whole drive. Names
+        are encrypted, so this decrypts those it looks through in memory: about
         half a second per 100,000 items. Returns up to `limit` (entry, path)
         pairs, best first, where path is the (id, name) folders above the
-        entry, and the total number of matches."""
+        entry, from the top of the drive, and the total number of matches."""
+        self._dir(drive, parent_id)
         terms = query.casefold().split()
         if not terms:
             return [], 0
         rows = self.conn.execute(
             "SELECT id, parent_id, kind, name_enc, size, created_at FROM nodes "
             "WHERE drive_id = ? AND state = 'ready'", (drive.id,)).fetchall()
+        if parent_id is not None:
+            children: dict[str | None, list[sqlite3.Row]] = {}
+            for r in rows:
+                children.setdefault(r["parent_id"], []).append(r)
+            rows = list(children.get(parent_id, ()))
+            for r in rows:  # grows as it goes, down to the last folder
+                rows += children.get(r["id"], ())
         names = {r["id"]: drive.keys.decrypt_name(r["id"], r["name_enc"]) for r in rows}
         parents = {r["id"]: r["parent_id"] for r in rows}
+        above = [(e.id, e.name) for e in self.path(drive, parent_id)]
         whole = " ".join(terms)
 
         def rank(r: sqlite3.Row) -> tuple:
@@ -529,12 +540,12 @@ class Storage:
         for r in hits[:limit]:
             crumbs: list[tuple[str, str]] = []
             parent = r["parent_id"]
-            while parent is not None and parent in names:
+            while parent is not None and parent in names:  # stops at parent_id, which isn't among them
                 crumbs.append((parent, names[parent]))
                 parent = parents[parent]
             entry = Entry(r["id"], r["kind"], names[r["id"]], r["size"], r["created_at"],
                           r["kind"] == "file" and self.has_thumbnail(r["id"]))
-            results.append((entry, crumbs[::-1]))
+            results.append((entry, above + crumbs[::-1]))
         return results, len(hits)
 
     def path(self, drive: Drive, node_id: str | None) -> list[Entry]:

@@ -4,16 +4,19 @@ import { useState, type FormEvent, type ReactNode } from "react";
 import { api, ApiError } from "../api";
 import { forgetThumbnails } from "../thumbs";
 import { checkNewPassword, NewPasswordFields, RecoveryKeyDialog } from "./driveDialogs";
-import LockDial from "./LockDial";
+import LockDial, { DialFace } from "./LockDial";
 import { Button, ErrorNote, Field, useSubmit } from "./ui";
 
 function Screen({ title, intro, children }: { title: string; intro: ReactNode; children: ReactNode }) {
   return (
-    <main className="mx-auto flex min-h-screen max-w-md flex-col justify-center px-5 py-16">
-      <LockDial unlocked={false} />
-      <h1 className="mt-6 text-4xl font-semibold tracking-tight">{title}</h1>
-      <p className="mt-3 text-muted">{intro}</p>
-      <div className="mt-8">{children}</div>
+    <main className="relative flex min-h-dvh items-center justify-center overflow-hidden px-4 py-10">
+      <DialFace className="pointer-events-none absolute left-1/2 top-1/2 w-[54rem] max-w-none -translate-x-1/2 -translate-y-1/2" />
+      <div className="relative w-full max-w-sm rounded-3xl border border-line bg-paper p-7 shadow-2xl shadow-black/20">
+        <LockDial unlocked={false} />
+        <h1 className="mt-5 text-xl font-semibold tracking-tight">{title}</h1>
+        {intro && <p className="mt-1.5 text-sm leading-relaxed text-muted">{intro}</p>}
+        <div className="mt-6">{children}</div>
+      </div>
     </main>
   );
 }
@@ -154,7 +157,7 @@ function LoginScreen({ onUnlocked }: { onUnlocked: () => void }) {
         </Button>
         <button
           type="button"
-          className="text-sm text-teal underline underline-offset-2"
+          className="text-sm text-muted underline underline-offset-4 hover:text-ink"
           onClick={() => {
             setError(null);
             setMode(mode === "password" ? "recovery" : "password");
@@ -189,7 +192,7 @@ export default function VaultGate({ children }: { children: ReactNode }) {
     void queryClient.invalidateQueries({ queryKey: ["vault"] });
   };
 
-  if (vault.isPending) return <p className="p-10 text-muted">Loading…</p>;
+  if (vault.isPending) return <p className="p-10 text-sm text-muted">Loading…</p>;
   if (vault.error) {
     return (
       <Screen title="tgdrive" intro="">

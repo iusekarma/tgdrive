@@ -493,11 +493,12 @@ async def list_nodes(parent: str | None = None, drive: Drive = Depends(unlocked_
 
 
 @router.get("/drives/{name}/search")
-async def search(q: Annotated[str, Query(max_length=200)], limit: Annotated[int, Query(ge=1, le=1000)] = 200,
-                 drive: Drive = Depends(unlocked_drive), store: Storage = Depends(get_store)):
-    """Searches file and folder names across the whole drive. `total` counts
-    every match; at most `limit` are returned, best first."""
-    results, total = store.search(drive, q, limit)
+async def search(q: Annotated[str, Query(max_length=200)], parent: str | None = None,
+                 limit: Annotated[int, Query(ge=1, le=1000)] = 200, drive: Drive = Depends(unlocked_drive), store: Storage = Depends(get_store)):
+    """Searches file and folder names under the folder `parent`, or across the
+    whole drive. `total` counts every match; at most `limit` are returned,
+    best first."""
+    results, total = store.search(drive, q, limit, parent)
     return {
         "total": total,
         "results": [

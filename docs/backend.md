@@ -140,8 +140,8 @@ names are checked as they will be once every rename is done (the old names
 of the items being renamed are free), so items can swap or cycle names in
 one call, and the rows are updated in one transaction.
 
-`search(drive, query)` splits the query into words, decrypts every name in
-the drive, keeps names containing every word (case-insensitive), and ranks
+`search(drive, query, limit, parent_id)` splits the query into words,
+decrypts every name in the drive (or only those below `parent_id`), keeps names containing every word (case-insensitive), and ranks
 them: exact name or name-without-extension first, then names starting with
 the first word, then the rest; folders before files. It returns up to
 `limit` results with their folder path, plus the total match count.

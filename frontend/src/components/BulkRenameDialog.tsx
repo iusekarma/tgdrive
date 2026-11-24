@@ -33,7 +33,7 @@ export type Renamed = { id: string; from: string; to: string };
 /** At most this many rows are drawn in the preview; every item is still checked and renamed. */
 const PREVIEW_ROWS = 400;
 
-const INPUT = "w-full rounded-md border border-line bg-surface px-2.5 py-1.5 text-sm text-ink placeholder:text-muted focus:border-teal";
+const INPUT = "w-full rounded-md border border-line bg-paper px-2.5 py-1.5 text-sm text-ink placeholder:text-muted focus:border-accent";
 const SMALL_BUTTON = "inline-flex rounded p-1 text-muted hover:bg-ink/5 hover:text-ink disabled:opacity-30 disabled:hover:bg-transparent";
 
 export function BulkRenameDialog({
@@ -131,7 +131,7 @@ export function BulkRenameDialog({
               </li>
             )}
             {settings.rules.map((rule, i) => (
-              <li key={rule.id} className={`rounded-lg border border-line bg-surface p-3 ${rule.on ? "" : "opacity-60"}`}>
+              <li key={rule.id} className={`rounded-lg border border-line bg-paper p-3 ${rule.on ? "" : "opacity-60"}`}>
                 <div className="mb-2 flex items-center gap-1">
                   <label className="mr-auto flex items-center gap-2 text-sm font-medium">
                     <input type="checkbox" checked={rule.on} onChange={(e) => updateRule(rule.id, { on: e.target.checked })} />
@@ -179,9 +179,9 @@ export function BulkRenameDialog({
 
           <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-sm">
             <label className="flex items-center gap-2">
-              Number in order of
+              <span className="shrink-0">Number in order of</span>
               <select
-                className={`${INPUT} w-auto`}
+                className={`${INPUT} w-auto min-w-0 shrink`}
                 value={settings.order}
                 onChange={(e) => setSettings((s) => ({ ...s, order: e.target.value as Order }))}
               >
@@ -213,7 +213,7 @@ export function BulkRenameDialog({
               {TOKENS.map((t) => (
                 <div key={t.token} className="contents">
                   <dt>
-                    <code className="text-teal">{t.token}</code>
+                    <code className="text-accent">{t.token}</code>
                   </dt>
                   <dd className="text-muted">{t.meaning}</dd>
                 </div>
@@ -236,21 +236,21 @@ export function BulkRenameDialog({
               )}
               {infoLoading > 0 && <span className="text-muted"> · reading details ({infoLoading} left)</span>}
             </p>
-            <div role="group" aria-label="Show" className="flex rounded-md border border-line bg-surface p-0.5 text-xs">
+            <div role="group" aria-label="Show" className="flex rounded-md border border-line bg-paper p-0.5 text-xs">
               {(["all", "changes", "problems"] as const).map((v) => (
                 <button
                   key={v}
                   type="button"
                   aria-pressed={show === v}
                   onClick={() => setShow(v)}
-                  className={`rounded px-2 py-1 capitalize ${show === v ? "bg-teal text-teal-ink" : "text-muted hover:text-ink"}`}
+                  className={`rounded px-2 py-1 capitalize ${show === v ? "bg-ink/10 text-ink" : "text-muted hover:text-ink"}`}
                 >
                   {v}
                 </button>
               ))}
             </div>
           </div>
-          <ul className="max-h-[60vh] divide-y divide-line overflow-y-auto rounded-md border border-line bg-surface">
+          <ul className="max-h-[60vh] divide-y divide-line overflow-y-auto rounded-md border border-line bg-paper">
             {shown.length === 0 && <li className="p-3 text-sm text-muted">Nothing to show.</li>}
             {shown.slice(0, PREVIEW_ROWS).map((p) => (
               <PreviewRow key={p.entry.id} planned={p} />
@@ -293,7 +293,7 @@ function PreviewRow({ planned: p }: { planned: Planned }) {
           <ArrowRight size={13} className="shrink-0 text-muted" aria-hidden="true" />
           <span className="truncate font-medium" title={to}>
             {to.slice(0, start)}
-            <mark className="rounded-sm bg-teal/20 text-ink">{to.slice(start, to.length - end)}</mark>
+            <mark className="rounded-sm bg-accent/20 text-ink">{to.slice(start, to.length - end)}</mark>
             {to.slice(to.length - end)}
           </span>
         </div>
@@ -310,7 +310,7 @@ function PreviewRow({ planned: p }: { planned: Planned }) {
 
 function AddRule({ onAdd }: { onAdd: (type: RuleType) => void }) {
   return (
-    <label className="relative inline-flex items-center gap-1.5 rounded-md border border-line bg-surface px-2.5 py-1.5 text-sm font-medium hover:bg-ink/5">
+    <label className="relative inline-flex items-center gap-1.5 rounded-md border border-line bg-paper px-2.5 py-1.5 text-sm font-medium hover:bg-ink/5">
       <Plus size={15} aria-hidden="true" />
       Add rule
       <select
@@ -347,7 +347,7 @@ function Presets({ settings, onLoad }: { settings: Settings; onLoad: (settings: 
       <ul className="mt-2 space-y-1">
         {presets.map((p) => (
           <li key={p.name} className="flex items-center gap-2">
-            <button type="button" className="mr-auto truncate text-left text-teal hover:underline" onClick={() => onLoad(p.settings)}>
+            <button type="button" className="mr-auto truncate text-left text-accent hover:underline" onClick={() => onLoad(p.settings)}>
               {p.name}
             </button>
             <button
@@ -373,7 +373,7 @@ function Presets({ settings, onLoad }: { settings: Settings; onLoad: (settings: 
         }}
       >
         <input className={INPUT} placeholder="Save these rules as…" value={name} maxLength={60} onChange={(e) => setName(e.target.value)} />
-        <Button type="submit" className="py-1.5" disabled={!name.trim()}>
+        <Button type="submit" size="sm" disabled={!name.trim()}>
           Save
         </Button>
       </form>

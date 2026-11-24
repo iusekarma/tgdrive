@@ -1,9 +1,7 @@
 import { ArrowDownWideNarrow, ArrowUpNarrowWide, Check } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
 
 import { SORT_LABELS, type Sort, type SortKey } from "../sorting";
-
-const ROW = "flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm text-ink hover:bg-ink/5";
+import { Menu, MENU_ROW, MenuDivider, MenuHeading } from "./menu";
 
 /**
  * The sort as a menu: what to sort by, which way, and whether folders come first.
@@ -21,47 +19,35 @@ export function SortMenu({
   relevance?: boolean;
   onRelevance?: () => void;
 }) {
-  const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (e: MouseEvent) => {
-      if (!ref.current?.contains(e.target as Node)) setOpen(false);
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("mousedown", onDown);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDown);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
-
-  const label = sort ? `Sorted by ${SORT_LABELS[sort.key].toLowerCase()}, ${sort.desc ? "descending" : "ascending"}` : "Sorted by relevance";
+  const label = sort
+    ? `Sorted by ${SORT_LABELS[sort.key].toLowerCase()}, ${sort.desc ? "descending" : "ascending"}`
+    : "Sorted by relevance";
   const Icon = sort?.desc ? ArrowDownWideNarrow : ArrowUpNarrowWide;
-  const tick = (on: boolean) => <Check size={15} className={on ? "text-teal" : "invisible"} aria-hidden="true" />;
+  const tick = (on: boolean) => <Check size={15} className={on ? "text-accent" : "invisible"} aria-hidden="true" />;
 
   return (
-    <div ref={ref} className="relative">
-      <button
-        type="button"
-        aria-haspopup="menu"
-        aria-expanded={open}
-        aria-label={label}
-        title={label}
-        onClick={() => setOpen((o) => !o)}
-        className="inline-flex items-center gap-1.5 rounded-md border border-line bg-surface px-2.5 py-2 text-sm text-muted hover:text-ink"
-      >
-        <Icon size={16} aria-hidden="true" />
-        <span className="hidden sm:inline">{sort ? SORT_LABELS[sort.key] : "Relevance"}</span>
-      </button>
-      {open && (
-        <div role="menu" className="absolute right-0 z-20 mt-1 w-52 rounded-md border border-line bg-surface py-1 shadow-lg">
-          <p className="px-3 pb-1 pt-1.5 text-xs font-medium uppercase tracking-wide text-muted">Sort by</p>
+    <Menu
+      label={label}
+      width="w-52"
+      buttonClass="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg border border-line px-2 text-[13px] text-muted transition-colors hover:text-ink"
+      trigger={
+        <>
+          <Icon size={15} aria-hidden="true" />
+          <span className="hidden @2xl:inline">{sort ? SORT_LABELS[sort.key] : "Relevance"}</span>
+        </>
+      }
+    >
+      {() => (
+        <>
+          <MenuHeading>Sort by</MenuHeading>
           {relevance && (
-            <button type="button" role="menuitemradio" aria-checked={sort === null} className={ROW} onClick={() => onRelevance?.()}>
+            <button
+              type="button"
+              role="menuitemradio"
+              aria-checked={sort === null}
+              className={MENU_ROW}
+              onClick={() => onRelevance?.()}
+            >
               {tick(sort === null)}
               Relevance
             </button>
@@ -72,7 +58,7 @@ export function SortMenu({
               type="button"
               role="menuitemradio"
               aria-checked={sort?.key === key}
-              className={ROW}
+              className={MENU_ROW}
               onClick={() => onChange({ ...(sort ?? { desc: false, foldersFirst: true }), key })}
             >
               {tick(sort?.key === key)}
@@ -81,26 +67,26 @@ export function SortMenu({
           ))}
           {sort && (
             <>
-              <div className="my-1 border-t border-line" />
+              <MenuDivider />
               {([false, true] as const).map((desc) => (
                 <button
                   key={String(desc)}
                   type="button"
                   role="menuitemradio"
                   aria-checked={sort.desc === desc}
-                  className={ROW}
+                  className={MENU_ROW}
                   onClick={() => onChange({ ...sort, desc })}
                 >
                   {tick(sort.desc === desc)}
                   {directionLabel(sort.key, desc)}
                 </button>
               ))}
-              <div className="my-1 border-t border-line" />
+              <MenuDivider />
               <button
                 type="button"
                 role="menuitemcheckbox"
                 aria-checked={sort.foldersFirst}
-                className={ROW}
+                className={MENU_ROW}
                 onClick={() => onChange({ ...sort, foldersFirst: !sort.foldersFirst })}
               >
                 {tick(sort.foldersFirst)}
@@ -108,9 +94,9 @@ export function SortMenu({
               </button>
             </>
           )}
-        </div>
+        </>
       )}
-    </div>
+    </Menu>
   );
 }
 

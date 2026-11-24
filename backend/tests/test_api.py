@@ -382,6 +382,11 @@ class ApiTest(unittest.TestCase):
         r = c.get("/api/drives/main/search", params={"q": "BEA"}).json()
         self.assertEqual(r["total"], 1)
         self.assertEqual((r["results"][0]["name"], r["results"][0]["path"]), ("beach.jpg", [{"id": folder, "name": "Trips"}]))
+        empty = c.post("/api/drives/main/folders", json={"name": "Empty"}).json()["id"]
+        for parent, total in ((folder, 1), (empty, 0)):
+            r = c.get("/api/drives/main/search", params={"q": "beach", "parent": parent})
+            self.assertEqual(r.json()["total"], total)
+        self.assertEqual(c.get("/api/drives/main/search", params={"q": "b", "parent": "gone"}).status_code, 404)
         self.assertEqual(c.get("/api/drives/main/search", params={"q": "x" * 201}).status_code, 422)
         c.post("/api/drives/main/lock")
         self.assertEqual(c.get("/api/drives/main/search", params={"q": "b"}).status_code, 401)

@@ -1,15 +1,10 @@
 import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  ArrowDown,
-  ArrowLeft,
-  ArrowUp,
-  BookOpen,
-  ChevronRight,
+  CircleHelp,
   Download,
   Folder,
   FolderInput,
-  FolderPlus,
-  FolderUp,
+  HardDrive,
   Images,
   Info,
   KeyRound,
@@ -18,15 +13,14 @@ import {
   Network,
   PanelRight,
   Pencil,
-  Play,
   RefreshCw,
-  Search,
+  SearchX,
   ShieldPlus,
   Trash2,
   Upload,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type DragEvent, type MouseEvent, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
 
 import { api, ApiError, type Crumb, type DriveInfo, type Entry } from "../api";
@@ -38,26 +32,23 @@ import {
   WebDavDialog,
   type PasswordAction,
 } from "../components/driveDialogs";
-import { DetailsDialog, DetailsPanel, KindIcon } from "../components/details";
+import { AddCards, AddMenu, Breadcrumbs, FilterTabs, SearchBox, SelectionBar, ShortcutsDialog } from "../components/browserBars";
+import { DetailsDialog, DetailsPanel } from "../components/details";
 import { BulkRenameDialog, type Renamed } from "../components/BulkRenameDialog";
 import { DeleteNodeDialog, MoveDialog, NameDialog } from "../components/fileDialogs";
-import Sidebar from "../components/Sidebar";
+import { GridView, ListingSkeleton, ListView, type ListingProps } from "../components/listing";
+import { Menu, MENU_ROW, MenuDivider, MenuItem } from "../components/menu";
+import { Dock, Page, scrollToTop, Toast, Topbar } from "../components/shell";
 import { SortMenu } from "../components/SortMenu";
 import { Viewer } from "../components/viewer";
-import { Button, ErrorNote, ICON_BUTTON, Menu, MenuItem, PageHeader, useSavedView, ViewToggle } from "../components/ui";
+import { Button, ErrorNote, ICON_BUTTON, useSavedView, ViewToggle } from "../components/ui";
 import { pickedFromInput, readDropped, useUploads, type Picked } from "../components/uploads";
+import { category, countCategories, type Category } from "../filters";
 import type { RenameItem } from "../rename";
-import { DEFAULT_SORT, sortByColumn, sortEntries, useSavedSort, type Sort, type SortKey } from "../sorting";
-import { driveUrl, formatDate, formatSize, previewKind } from "../format";
-import {
-  cachedThumbnail,
-  forgetThumbnails,
-  hasThumbnail,
-  loadThumbnail,
-  makeThumbnail,
-  regenerateThumbnail,
-  useThumbnailVersion,
-} from "../thumbs";
+import { useSavedFlag } from "../saved";
+import { DEFAULT_SORT, sortByColumn, sortEntries, useSavedSort, type Sort } from "../sorting";
+import { driveUrl, formatSize, previewKind } from "../format";
+import { forgetThumbnails, makeThumbnail, regenerateThumbnail } from "../thumbs";
 
 type Open =
   | { type: "newFolder" }
@@ -72,146 +63,43 @@ type Open =
   | { type: "renameDrive" }
   | { type: "deleteDrive" }
   | { type: "webdav" }
+  | { type: "shortcuts" }
   | null;
-
-function EntryIcon({ entry, size = 20 }: { entry: Entry; size?: number }) {
-  return <KindIcon entry={entry} size={size} className="shrink-0" />;
-}
-
-/** Fetched when scrolled into view, a few at a time; an icon until then or if there is none. */
-function Thumb({ drive, entry, large = false }: { drive: string; entry: Entry; large?: boolean }) {
-  const wanted = hasThumbnail(entry);
-  const [url, setUrl] = useState<string | null | undefined>(() => (wanted ? cachedThumbnail(drive, entry.id) : null));
-  const ref = useRef<HTMLSpanElement>(null);
-  const version = useThumbnailVersion(drive, entry.id);
-
-  useEffect(() => {
-    if (!wanted) return setUrl(null);
-    const cached = cachedThumbnail(drive, entry.id);
-    if (cached !== undefined) return setUrl(cached);
-    const el = ref.current;
-    if (!el) return;
-    let live = true;
-    const observer = new IntersectionObserver(
-      (items) => {
-        if (!items.some((i) => i.isIntersecting)) return;
-        observer.disconnect();
-        void loadThumbnail(drive, entry.id).then((u) => live && setUrl(u));
-      },
-      { rootMargin: "200px" },
-    );
-    observer.observe(el);
-    return () => {
-      live = false;
-      observer.disconnect();
-    };
-  }, [drive, entry.id, entry.thumb, wanted, version]);
-
-  const box = large
-    ? "relative flex aspect-square w-full items-center justify-center overflow-hidden rounded-t-lg bg-ink/[0.04]"
-    : "relative flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-md";
-  return (
-    <span ref={ref} className={`${box} ${url && !large ? "bg-ink/[0.04]" : ""}`}>
-      {url ? (
-        <>
-          <img src={url} alt="" className="h-full w-full object-contain" draggable={false} />
-          <KindBadge entry={entry} large={large} />
-        </>
-      ) : (
-        <EntryIcon entry={entry} size={large ? 40 : 20} />
-      )}
-    </span>
-  );
-}
-
-const BADGES = { video: { Icon: Play, label: "Video" }, comic: { Icon: BookOpen, label: "Comic" } } as const;
-
-/** On a thumbnail, says it isn't simply a picture: a video, or a comic's cover. */
-function KindBadge({ entry, large }: { entry: Entry; large: boolean }) {
-  const kind = previewKind(entry.name, entry.size);
-  if (kind !== "video" && kind !== "comic") return null;
-  const { Icon, label } = BADGES[kind];
-  return (
-    <span
-      title={label}
-      className={`absolute flex items-center rounded bg-black/65 text-white ${large ? "bottom-1.5 left-1.5 gap-1 px-1.5 py-0.5 text-xs" : "bottom-0.5 left-0.5 p-0.5"}`}
-    >
-      <Icon size={large ? 12 : 9} className={kind === "video" ? "fill-current" : ""} aria-hidden="true" />
-      {large ? label : <span className="sr-only">{label}</span>}
-    </span>
-  );
-}
-
-/** Opens a folder, previews a file it can show, or downloads it. A click that
- * the parent claims for selection (preventDefault) does none of those. */
-function Opener({
-  drive,
-  entry,
-  onClick,
-  onPreview,
-  className,
-  children,
-}: {
-  drive: string;
-  entry: Entry;
-  onClick: (e: MouseEvent) => void;
-  onPreview: () => void;
-  className: string;
-  children: ReactNode;
-}) {
-  if (entry.kind === "dir") {
-    return (
-      <Link to={driveUrl(drive, entry.id)} onClick={onClick} className={className}>
-        {children}
-      </Link>
-    );
-  }
-  if (previewKind(entry.name, entry.size)) {
-    return (
-      <button
-        type="button"
-        onClick={(e) => {
-          onClick(e);
-          if (!e.defaultPrevented) onPreview();
-        }}
-        className={`${className} text-left`}
-      >
-        {children}
-      </button>
-    );
-  }
-  return (
-    <a href={api.fileUrl(drive, entry.id)} download={entry.name} onClick={onClick} className={className}>
-      {children}
-    </a>
-  );
-}
 
 /** Where a search result lives, e.g. "Photos › Trips › Italy". */
 function where(drive: string, path: Crumb[]): string {
   return [drive, ...path.map((c) => c.name)].join(" › ");
 }
 
-const DETAILS_KEY = "tgdrive.details";
+/** The search as the URL has it. Clearing it forgets that it was widened to the whole drive. */
+function searchParams(typed: string, wide: boolean): Record<string, string> {
+  const q = typed.trim();
+  if (!q) return {};
+  return wide ? { q, in: "drive" } : { q };
+}
 
-/** Whether the details panel is shown, remembered in this browser. */
-function useDetailsPanel(): [boolean, (show: boolean) => void] {
-  const [show, setShow] = useState(() => {
-    try {
-      return localStorage.getItem(DETAILS_KEY) === "1";
-    } catch {
-      return false;
-    }
-  });
-  function change(next: boolean) {
-    setShow(next);
-    try {
-      localStorage.setItem(DETAILS_KEY, next ? "1" : "0");
-    } catch {
-      /* private mode: the choice just isn't remembered */
-    }
+/** "6 folders, 14 files, 8.1 MB". */
+function summarize(entries: Entry[]): string {
+  const files = entries.filter((e) => e.kind === "file");
+  const folders = entries.length - files.length;
+  const parts = [];
+  if (folders) parts.push(`${folders.toLocaleString()} ${folders === 1 ? "folder" : "folders"}`);
+  if (files.length) {
+    parts.push(`${files.length.toLocaleString()} ${files.length === 1 ? "file" : "files"}`);
+    parts.push(formatSize(files.reduce((sum, e) => sum + e.size, 0)));
   }
-  return [show, change];
+  return parts.join(", ") || "Empty";
+}
+
+/** In place of a listing there is nothing in. */
+function Empty({ icon, title, children }: { icon: ReactNode; title: string; children?: ReactNode }) {
+  return (
+    <div className="flex flex-col items-center px-4 py-20 text-center">
+      <span className="flex h-12 w-12 items-center justify-center rounded-xl bg-ink/6 text-muted">{icon}</span>
+      <p className="mt-4 max-w-full break-words text-sm font-medium">{title}</p>
+      {children && <p className="mt-1 max-w-sm text-pretty text-sm text-muted">{children}</p>}
+    </div>
+  );
 }
 
 /** Shortcuts stay off while typing, but not while a selection checkbox has focus. */
@@ -233,11 +121,15 @@ export default function BrowserPage() {
   /** The last bulk rename, until something else happens, so it can be undone. */
   const [undoable, setUndoable] = useState<Renamed[] | null>(null);
   const [dragging, setDragging] = useState(false);
+  const [filter, setFilter] = useState<Category | null>(null);
+  const [searchOpen, setSearchOpen] = useState(false);
+  /** The cards for adding files are in view, so the top bar needn't offer it too. */
+  const [cardsInView, setCardsInView] = useState(true);
   const [view, changeView] = useSavedView("tgdrive.view");
   const [folderSort, setFolderSort] = useSavedSort();
   /** Search results come ranked by relevance (null) unless a sort is picked; that choice lasts the search. */
   const [searchSort, setSearchSort] = useState<Sort | null>(null);
-  const [showDetails, setShowDetails] = useDetailsPanel();
+  const [showDetails, setShowDetails] = useSavedFlag("tgdrive.details");
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const anchor = useRef<number | null>(null);
   /** The item the keyboard is on (highlighted, not necessarily selected). */
@@ -249,7 +141,6 @@ export default function BrowserPage() {
   /** The folder just left, to land on it when its parent opens. */
   const lastFolder = useRef<string | null>(null);
   const returnTo = useRef<string | null>(null);
-  const gridRef = useRef<HTMLUListElement>(null);
   const dragDepth = useRef(0);
   const fileInput = useRef<HTMLInputElement>(null);
   const folderInput = useRef<HTMLInputElement>(null);
@@ -258,14 +149,17 @@ export default function BrowserPage() {
   // The search lives in the URL, so Back returns to the results after opening one.
   const [params, setParams] = useSearchParams();
   const query = (params.get("q") ?? "").trim();
+  /** The folder a search stays inside, at any depth; null for the whole drive, which `?in=drive` widens it to. */
+  const wide = params.get("in") === "drive";
+  const scope = wide ? null : parent;
   const [typed, setTyped] = useState(query);
   // Follow the URL (Back, opening a folder) without undoing a space typed between words.
   useEffect(() => setTyped((t) => (t.trim() === query ? t : query)), [query]);
   useEffect(() => {
     if (typed.trim() === query) return;
-    const timer = setTimeout(() => setParams(typed.trim() ? { q: typed.trim() } : {}, { replace: true }), 250);
+    const timer = setTimeout(() => setParams(searchParams(typed, wide), { replace: true }), 250);
     return () => clearTimeout(timer);
-  }, [typed, query, setParams]);
+  }, [typed, query, wide, setParams]);
   const searching = query !== "";
   useEffect(() => {
     if (!searching) setSearchSort(null);
@@ -276,8 +170,8 @@ export default function BrowserPage() {
   const listing = useQuery({ queryKey: ["nodes", drive, parent], queryFn: () => api.list(drive, parent) });
   // Under "nodes", so every change that refreshes the folder refreshes the results too.
   const search = useQuery({
-    queryKey: ["nodes", drive, "search", query],
-    queryFn: () => api.search(drive, query),
+    queryKey: ["nodes", drive, "search", query, scope],
+    queryFn: () => api.search(drive, query, scope),
     enabled: searching,
     placeholderData: keepPreviousData,
   });
@@ -321,6 +215,8 @@ export default function BrowserPage() {
     setUndoable(null);
     setSelected(new Set());
     setCursor(null);
+    setFilter(null);
+    scrollToTop();
     anchor.current = null;
     returnTo.current = lastFolder.current;
     lastFolder.current = parent;
@@ -329,15 +225,23 @@ export default function BrowserPage() {
       makingRun.current = null;
       setMaking(null);
     };
-  }, [drive, parent, query]);
+  }, [drive, parent, query, scope]);
 
   // While searching, results stand in for the folder: selection and actions work the same.
   const results = useMemo(() => (searching ? (search.data?.results ?? []) : []), [searching, search.data]);
   const locations = new Map<string, Crumb[]>(results.map((r) => [r.id, r.path]));
-  const entries: Entry[] = useMemo(() => {
+  /** All of the folder, or of the results. `entries` is what the tabs leave of it. */
+  const everything: Entry[] = useMemo(() => {
     const raw = searching ? results : (listing.data?.entries ?? []);
     return sort ? sortEntries(raw, sort) : raw;
   }, [searching, results, listing.data, sort]);
+  const counts = useMemo(() => countCategories(everything), [everything]);
+  // The last of its kind may have been deleted, or moved.
+  const shownFilter = counts.some(([c]) => c === filter) ? filter : null;
+  const entries = useMemo(
+    () => (shownFilter ? everything.filter((e) => category(e) === shownFilter) : everything),
+    [everything, shownFilter],
+  );
   const crumbs = listing.data?.path ?? [];
   const chosen = entries.filter((e) => selected.has(e.id));
   const locationOf = (entry: Entry) => where(drive, locations.get(entry.id) ?? crumbs);
@@ -410,10 +314,35 @@ export default function BrowserPage() {
     navigate(driveUrl(drive, crumbs.length > 1 ? crumbs[crumbs.length - 2].id : null));
   }
 
-  /** How many items a row holds: one in the list, as many as fit across in the grid. */
-  function columns(): number {
-    if (view !== "grid" || !gridRef.current) return 1;
-    return Math.max(getComputedStyle(gridRef.current).gridTemplateColumns.split(" ").filter(Boolean).length, 1);
+  /** The item a row up or down from the highlight, by where they are on screen: a
+   * row's length depends on the window, and folders' rows aren't files'. */
+  function rowAway(dir: 1 | -1, from: number): number {
+    if (view !== "grid") return from + dir;
+    const box = (i: number) =>
+      document.querySelector(`[data-entry="${CSS.escape(entries[i].id)}"]`)?.getBoundingClientRect();
+    const start = box(from);
+    if (!start) return from + dir;
+    let best = -1;
+    let row: number | null = null;
+    let gap = Infinity;
+    for (let i = from + dir; i >= 0 && i < entries.length; i += dir) {
+      const r = box(i);
+      if (!r || Math.abs(r.top - start.top) < 2) continue;
+      if (row === null) row = r.top;
+      else if (Math.abs(r.top - row) >= 2) break;
+      if (Math.abs(r.left - start.left) < gap) {
+        gap = Math.abs(r.left - start.left);
+        best = i;
+      }
+    }
+    // Already on the first or last row.
+    return best >= 0 ? best : dir > 0 ? entries.length - 1 : 0;
+  }
+
+  function rowsAway(dir: 1 | -1, rows: number): number {
+    let at = cursorIndex;
+    for (let n = 0; n < rows; n += 1) at = Math.min(Math.max(rowAway(dir, at), 0), entries.length - 1);
+    return at;
   }
 
   /** Moves the highlight; with Shift, the selection stretches from where it started to here. */
@@ -452,13 +381,18 @@ export default function BrowserPage() {
       // Enter and Space on a focused button or link belong to it.
       const onControl =
         e.target instanceof HTMLElement && e.target !== document.body && e.target.closest("a, button, summary, input, [role=menu]");
-      const page = view === "grid" ? columns() * 4 : 10;
+      const page = view === "grid" ? 3 : 10;
       const here = cursorIndex;
       // The first arrow press lands on the first item (or the last, going up) rather than skipping it.
       const step = (by: number) => (here < 0 ? (by > 0 ? 0 : entries.length - 1) : here + by);
+      const stepRows = (dir: 1 | -1, rows: number) => (here < 0 ? step(dir) : rowsAway(dir, rows));
       if (e.key === "/") {
         e.preventDefault();
-        searchInput.current?.focus();
+        setSearchOpen(true);
+        requestAnimationFrame(() => searchInput.current?.focus());
+      } else if (e.key === "?") {
+        e.preventDefault();
+        setOpen({ type: "shortcuts" });
       } else if (mod && e.key.toLowerCase() === "a" && entries.length > 0) {
         e.preventDefault();
         setSelected(new Set(entries.map((x) => x.id)));
@@ -470,8 +404,7 @@ export default function BrowserPage() {
         goUp();
       } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
         e.preventDefault();
-        const by = view === "grid" ? columns() : 1;
-        moveCursor(step(e.key === "ArrowDown" ? by : -by), e.shiftKey);
+        moveCursor(stepRows(e.key === "ArrowDown" ? 1 : -1, 1), e.shiftKey);
       } else if ((e.key === "ArrowRight" || e.key === "ArrowLeft") && view === "grid" && !e.altKey) {
         e.preventDefault();
         moveCursor(step(e.key === "ArrowRight" ? 1 : -1), e.shiftKey);
@@ -480,7 +413,7 @@ export default function BrowserPage() {
         moveCursor(e.key === "Home" ? 0 : entries.length - 1, e.shiftKey);
       } else if (e.key === "PageDown" || e.key === "PageUp") {
         e.preventDefault();
-        moveCursor(step(e.key === "PageDown" ? page : -page), e.shiftKey);
+        moveCursor(stepRows(e.key === "PageDown" ? 1 : -1, page), e.shiftKey);
       } else if (e.key === "Enter" && cursorEntry && !onControl) {
         e.preventDefault();
         openEntry(cursorEntry);
@@ -508,22 +441,48 @@ export default function BrowserPage() {
     if (files.length > 0 || emptyFolders.length > 0) uploads.enqueue(drive, parent, files, emptyFolders);
   }
 
-  function onDrop(e: DragEvent) {
-    e.preventDefault();
-    dragDepth.current = 0;
-    setDragging(false);
-    setNotice(null);
-    // Folders are read in after the drop, so `parent` is captured now.
-    const target = { drive, parent };
-    readDropped(e.dataTransfer).then(
-      ({ files, folders }) => {
-        if (files.length > 0 || folders.length > 0) uploads.enqueue(target.drive, target.parent, files, folders);
-      },
-      () => setNotice("Some of what was dropped couldn't be read. Try choosing it with Upload instead."),
-    );
-  }
-
-  const hasFiles = (e: DragEvent) => Array.from(e.dataTransfer.types).includes("Files");
+  // Dropped anywhere in the window, the sidebar included: a miss would make the browser open the file.
+  useEffect(() => {
+    const hasFiles = (e: DragEvent) => !!e.dataTransfer && Array.from(e.dataTransfer.types).includes("Files");
+    function onEnter(e: DragEvent) {
+      if (!hasFiles(e)) return;
+      dragDepth.current += 1;
+      setDragging(true);
+    }
+    function onLeave(e: DragEvent) {
+      if (!hasFiles(e)) return;
+      dragDepth.current = Math.max(0, dragDepth.current - 1);
+      if (dragDepth.current === 0) setDragging(false);
+    }
+    function onOver(e: DragEvent) {
+      if (hasFiles(e)) e.preventDefault();
+    }
+    function onDrop(e: DragEvent) {
+      if (!e.dataTransfer || !hasFiles(e)) return;
+      e.preventDefault();
+      dragDepth.current = 0;
+      setDragging(false);
+      setNotice(null);
+      // Folders are read in after the drop, so `parent` is captured now.
+      const target = { drive, parent };
+      readDropped(e.dataTransfer).then(
+        ({ files, folders }) => {
+          if (files.length > 0 || folders.length > 0) uploads.enqueue(target.drive, target.parent, files, folders);
+        },
+        () => setNotice("Some of what was dropped couldn't be read. Try choosing it with Upload instead."),
+      );
+    }
+    window.addEventListener("dragenter", onEnter);
+    window.addEventListener("dragleave", onLeave);
+    window.addEventListener("dragover", onOver);
+    window.addEventListener("drop", onDrop);
+    return () => {
+      window.removeEventListener("dragenter", onEnter);
+      window.removeEventListener("dragleave", onLeave);
+      window.removeEventListener("dragover", onOver);
+      window.removeEventListener("drop", onDrop);
+    };
+  });
 
   function leaveDrive() {
     queryClient.removeQueries({ queryKey: ["nodes", drive] });
@@ -579,7 +538,7 @@ export default function BrowserPage() {
     });
     // Only the folder on screen is known in full; for search results the server checks.
     const others = new Map<string | null, Set<string>>();
-    if (!searching) others.set(parent, new Set(entries.filter((e) => !ids.has(e.id)).map((e) => e.name)));
+    if (!searching) others.set(parent, new Set(everything.filter((e) => !ids.has(e.id)).map((e) => e.name)));
     return { items: list, others };
   }
 
@@ -587,7 +546,7 @@ export default function BrowserPage() {
   const canThumbnail = (entry: Entry) =>
     entry.kind === "file" && ["image", "video", "comic"].includes(previewKind(entry.name, entry.size) ?? "");
 
-  const missingThumbnails = searching ? [] : entries.filter((e) => canThumbnail(e) && !e.thumb);
+  const missingThumbnails = searching ? [] : everything.filter((e) => canThumbnail(e) && !e.thumb);
 
   /** One file at a time, so Telegram and the browser's connections stay free for browsing. */
   async function makeThumbnails() {
@@ -639,7 +598,7 @@ export default function BrowserPage() {
                   href={api.fileUrl(drive, entry.id)}
                   download={entry.name}
                   onClick={closeMenu}
-                  className="flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm text-ink hover:bg-ink/5"
+                  className={`${MENU_ROW} text-ink [&>svg]:text-muted`}
                 >
                   <Download size={16} />
                   Download
@@ -691,6 +650,7 @@ export default function BrowserPage() {
                 <FolderInput size={16} />
                 Move
               </MenuItem>
+              <MenuDivider />
               <MenuItem danger onSelect={pick({ type: "delete", entries: [entry] })}>
                 <Trash2 size={16} />
                 Delete
@@ -702,529 +662,364 @@ export default function BrowserPage() {
     );
   }
 
-  function checkbox(entry: Entry, index: number, className = "") {
-    return (
-      <input
-        type="checkbox"
-        aria-label={`Select ${entry.name}`}
-        checked={selected.has(entry.id)}
-        // A checkbox's change event is a click, so it carries the Shift key.
-        onChange={(e) => toggle(index, (e.nativeEvent as unknown as globalThis.MouseEvent).shiftKey)}
-        className={`h-4 w-4 shrink-0 accent-[var(--teal)] ${className}`}
-      />
-    );
+  const allSelected = entries.length > 0 && chosen.length === entries.length;
+  const selectAll = () => setSelected(new Set(entries.map((e) => e.id)));
+  const here = crumbs.length ? crumbs[crumbs.length - 1].name : drive;
+  /** What a search looks through, by name. */
+  const searched = scope === null ? drive : crumbs.length ? here : "this folder";
+  // Results of the last search stay up while the next one runs; what's said about them would be wrong.
+  const stale = search.isPending || search.isPlaceholderData;
+  const trouble = !searching && listing.error && !driveLocked && status !== 401 ? listing.error : null;
+  const adds = {
+    onUpload: () => fileInput.current?.click(),
+    onUploadFolder: () => folderInput.current?.click(),
+    onNewFolder: () => setOpen({ type: "newFolder" }),
+  };
+  const listingProps: ListingProps = {
+    drive,
+    entries,
+    selected,
+    cursor,
+    claimClick,
+    onToggle: toggle,
+    onPreview: (entry) => setOpen({ type: "preview", entry }),
+    locationOf: (entry) => (locations.has(entry.id) ? where(drive, locations.get(entry.id) ?? []) : null),
+    menu: itemMenu,
+  };
+
+  function clearSearch() {
+    setTyped("");
+    setParams({}, { replace: true });
   }
 
-  const allSelected = entries.length > 0 && chosen.length === entries.length;
-
-  /** A list header that sorts by its column; clicking it again flips the direction. */
-  function column(key: SortKey, label: string) {
-    const active = sort?.key === key;
-    const Arrow = sort?.desc ? ArrowDown : ArrowUp;
+  function driveMenu() {
     return (
-      <button
-        type="button"
-        onClick={() => changeSort(sortByColumn(sort ?? { ...DEFAULT_SORT, key: "type" }, key))}
-        aria-label={active ? `${label}, sorted ${sort?.desc ? "descending" : "ascending"}` : `Sort by ${label.toLowerCase()}`}
-        title={`Sort by ${label.toLowerCase()}`}
-        className={`inline-flex items-center gap-1 rounded px-1 uppercase tracking-wide hover:text-ink ${active ? "text-ink" : ""}`}
-      >
-        {label}
-        {active && <Arrow size={12} aria-hidden="true" />}
-      </button>
+      <Menu label="Drive settings">
+        {(closeMenu) => {
+          const pick = (next: Open) => () => {
+            closeMenu();
+            setOpen(next);
+          };
+          return (
+            <>
+              {info?.protected && (
+                <MenuItem
+                  onSelect={() => {
+                    closeMenu();
+                    void lockDrive();
+                  }}
+                >
+                  <Lock size={16} />
+                  Lock drive
+                </MenuItem>
+              )}
+              <MenuItem onSelect={pick({ type: "renameDrive" })}>
+                <Pencil size={16} />
+                Rename drive
+              </MenuItem>
+              {info?.protected ? (
+                <>
+                  <MenuItem onSelect={pick({ type: "password", action: "change" })}>
+                    <KeyRound size={16} />
+                    Change password
+                  </MenuItem>
+                  <MenuItem onSelect={pick({ type: "password", action: "remove" })}>
+                    <LockOpen size={16} />
+                    Remove password
+                  </MenuItem>
+                </>
+              ) : (
+                <MenuItem onSelect={pick({ type: "password", action: "add" })}>
+                  <ShieldPlus size={16} />
+                  Add a password
+                </MenuItem>
+              )}
+              <MenuItem onSelect={pick({ type: "webdav" })}>
+                <Network size={16} />
+                WebDAV access
+              </MenuItem>
+              <MenuItem onSelect={pick({ type: "shortcuts" })}>
+                <CircleHelp size={16} />
+                Keyboard shortcuts
+              </MenuItem>
+              <MenuDivider />
+              <MenuItem danger onSelect={pick({ type: "deleteDrive" })}>
+                <Trash2 size={16} />
+                Delete drive
+              </MenuItem>
+            </>
+          );
+        }}
+      </Menu>
     );
   }
 
   return (
-    <div
-      className="min-h-screen"
-      onDragEnter={(e) => {
-        if (!hasFiles(e)) return;
-        dragDepth.current += 1;
-        setDragging(true);
-      }}
-      onDragLeave={(e) => {
-        if (!hasFiles(e)) return;
-        dragDepth.current = Math.max(0, dragDepth.current - 1);
-        if (dragDepth.current === 0) setDragging(false);
-      }}
-      onDragOver={(e) => {
-        if (hasFiles(e)) e.preventDefault();
-      }}
-      onDrop={onDrop}
-    >
-      <PageHeader wide>
-        {info?.protected && (
-          <Button onClick={() => void lockDrive()}>
-            <Lock size={16} />
-            Lock drive
-          </Button>
-        )}
-        <Menu label="Drive settings">
-          {(closeMenu) => {
-            const pick = (next: Open) => () => {
-              closeMenu();
-              setOpen(next);
-            };
-            return (
-              <>
-                {info?.protected ? (
-                  <>
-                    <MenuItem onSelect={pick({ type: "password", action: "change" })}>
-                      <KeyRound size={16} />
-                      Change password
-                    </MenuItem>
-                    <MenuItem onSelect={pick({ type: "password", action: "remove" })}>
-                      <LockOpen size={16} />
-                      Remove password
-                    </MenuItem>
-                  </>
-                ) : (
-                  <MenuItem onSelect={pick({ type: "password", action: "add" })}>
-                    <ShieldPlus size={16} />
-                    Add a password
-                  </MenuItem>
-                )}
-                <MenuItem onSelect={pick({ type: "renameDrive" })}>
-                  <Pencil size={16} />
-                  Rename drive
-                </MenuItem>
-                <MenuItem onSelect={pick({ type: "webdav" })}>
-                  <Network size={16} />
-                  WebDAV access
-                </MenuItem>
-                <MenuItem danger onSelect={pick({ type: "deleteDrive" })}>
-                  <Trash2 size={16} />
-                  Delete drive
-                </MenuItem>
-              </>
-            );
-          }}
-        </Menu>
-      </PageHeader>
-
-      <div className="flex">
-        <aside className="sticky top-0 hidden h-screen w-64 shrink-0 self-start overflow-y-auto border-r border-line lg:block">
-          <Sidebar drive={drive} folder={parent} path={crumbs} />
-        </aside>
-
-        <main className="mx-auto min-w-0 max-w-4xl flex-1 px-5 pb-32 pt-6">
-          <Link
-            to="/"
-            className="-ml-1 inline-flex items-center gap-1.5 rounded px-1 py-0.5 text-sm text-muted hover:bg-ink/5 hover:text-ink"
-          >
-            <ArrowLeft size={16} aria-hidden="true" />
-            All drives
-          </Link>
-          <nav aria-label="Folder path" className="mt-2 flex flex-wrap items-center gap-x-1 gap-y-1">
-            <Link
-              to={driveUrl(drive)}
-              className={`rounded px-1 text-3xl font-semibold tracking-tight hover:bg-ink/5 ${crumbs.length ? "text-muted" : ""}`}
+    <>
+      <Page>
+        <Topbar>
+          <div className={`flex min-w-0 flex-1 ${searchOpen || typed ? "@max-2xl:hidden" : ""}`}>
+            <Breadcrumbs drive={drive} path={crumbs} />
+          </div>
+          <SearchBox
+            label={`Search ${searched}`}
+            value={typed}
+            onChange={setTyped}
+            onClear={clearSearch}
+            expanded={searchOpen || typed !== ""}
+            onExpand={setSearchOpen}
+            inputRef={searchInput}
+          />
+          {!cardsInView && !searching && !trouble && (
+            <span className="hidden @2xl:block">
+              <AddMenu {...adds} />
+            </span>
+          )}
+          {info?.protected && (
+            <button
+              type="button"
+              onClick={() => void lockDrive()}
+              aria-label="Lock drive"
+              title="Lock drive"
+              className={`${ICON_BUTTON} @max-2xl:hidden`}
             >
-              {drive}
-            </Link>
-            {crumbs.map((c, i) => (
-              <span key={c.id} className="flex min-w-0 items-center gap-1">
-                <ChevronRight size={20} className="shrink-0 text-muted" aria-hidden="true" />
-                <Link
-                  to={driveUrl(drive, c.id)}
-                  aria-current={i === crumbs.length - 1 ? "page" : undefined}
-                  className={`truncate rounded px-1 text-3xl font-semibold tracking-tight hover:bg-ink/5 ${i === crumbs.length - 1 ? "" : "text-muted"}`}
-                >
-                  {c.name}
-                </Link>
-              </span>
-            ))}
-          </nav>
+              <Lock size={17} aria-hidden="true" />
+            </button>
+          )}
+          <button
+            type="button"
+            aria-pressed={showDetails}
+            aria-label="Details panel"
+            title={showDetails ? "Hide details" : "Show details"}
+            onClick={() => setShowDetails(!showDetails)}
+            className={`${ICON_BUTTON} !hidden xl:!inline-flex ${showDetails ? "bg-ink/9 !text-ink" : ""}`}
+          >
+            <PanelRight size={17} aria-hidden="true" />
+          </button>
+          {driveMenu()}
+        </Topbar>
 
-          <div className="mt-6 flex flex-wrap items-center gap-2">
-            <Button variant="primary" onClick={() => fileInput.current?.click()}>
-              <Upload size={16} />
-              Upload files
-            </Button>
-            <Button onClick={() => folderInput.current?.click()}>
-              <FolderUp size={16} />
-              Upload folder
-            </Button>
-            <Button onClick={() => setOpen({ type: "newFolder" })}>
-              <FolderPlus size={16} />
-              New folder
-            </Button>
-            {making ? (
-              <span className="inline-flex items-center gap-2 text-sm text-muted" role="status">
-                Making thumbnails: {making.done} of {making.total}
-                <Button className="py-1.5" onClick={stopMakingThumbnails}>
-                  <X size={16} />
-                  Stop
-                </Button>
-              </span>
-            ) : (
-              missingThumbnails.length > 0 && (
-                <Button
-                  onClick={() => void makeThumbnails()}
-                  title={`Make thumbnails for the ${missingThumbnails.length} images, videos and comics here that have none`}
-                >
-                  <Images size={16} />
-                  Make thumbnails
-                </Button>
-              )
-            )}
-            <input
-              ref={fileInput}
-              type="file"
-              multiple
-              hidden
-              onChange={(e) => {
-                addFiles(pickedFromInput(e.target.files));
-                e.target.value = "";
-              }}
-            />
-            <input
-              ref={(el) => {
-                folderInput.current = el;
-                // Not in React's types. The browser then hands over every file inside, each with its path.
-                el?.setAttribute("webkitdirectory", "");
-              }}
-              type="file"
-              hidden
-              onChange={(e) => {
-                addFiles(pickedFromInput(e.target.files));
-                e.target.value = "";
-              }}
-            />
-            <label className="relative order-last w-full sm:order-none sm:ml-auto sm:w-64">
-              <span className="sr-only">Search {drive}</span>
-              <Search
-                size={16}
-                className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted"
-                aria-hidden="true"
-              />
-              <input
-                ref={searchInput}
-                type="search"
-                placeholder={`Search ${drive}`}
-                value={typed}
-                onChange={(e) => setTyped(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Escape") {
-                    setTyped("");
-                    setParams({}, { replace: true });
-                    e.currentTarget.blur();
-                  }
+        <main className="shrink-0 px-4 pb-32 pt-6 @3xl:px-8">
+          {!trouble && (
+            <>
+              <h1 className="truncate text-2xl font-semibold tracking-tight" title={searching ? undefined : here}>
+                {searching ? `Results for “${query}”` : here}
+              </h1>
+              {/* One line of a fixed height: the thumbnails button comes and goes without moving anything. */}
+              <div className="mt-1 flex h-7 items-center gap-3 text-sm text-muted">
+                <p className="truncate" aria-live="polite">
+                  {searching
+                    ? stale
+                      ? "Searching…"
+                      : search.error
+                        ? ""
+                        : search.data && search.data.total > search.data.results.length
+                          ? `The best ${search.data.results.length} of ${search.data.total} matches in ${searched}`
+                          : `${search.data?.total ?? 0} ${search.data?.total === 1 ? "match" : "matches"} in ${searched}`
+                    : listing.data
+                      ? summarize(everything)
+                      : "Loading…"}
+                </p>
+                {searching && parent !== null && (
+                  <button
+                    type="button"
+                    onClick={() => setParams(searchParams(typed, !wide), { replace: true })}
+                    className="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-lg bg-ink/6 px-2.5 text-[13px] text-ink transition-colors hover:bg-ink/10"
+                  >
+                    {wide ? <Folder size={14} aria-hidden="true" /> : <HardDrive size={14} aria-hidden="true" />}
+                    {wide ? "Search this folder only" : "Search whole drive"}
+                  </button>
+                )}
+                {!making && missingThumbnails.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => void makeThumbnails()}
+                    title={`${missingThumbnails.length} images, videos and comics here have no thumbnail`}
+                    className="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-lg bg-ink/6 px-2.5 text-[13px] text-ink transition-colors hover:bg-ink/10"
+                  >
+                    <Images size={14} aria-hidden="true" />
+                    Make {missingThumbnails.length.toLocaleString()}{" "}
+                    {missingThumbnails.length === 1 ? "thumbnail" : "thumbnails"}
+                  </button>
+                )}
+              </div>
+            </>
+          )}
+
+          {!searching && !trouble && <AddCards {...adds} onVisible={setCardsInView} />}
+          <input
+            ref={fileInput}
+            type="file"
+            multiple
+            hidden
+            onChange={(e) => {
+              addFiles(pickedFromInput(e.target.files));
+              e.target.value = "";
+            }}
+          />
+          <input
+            ref={(el) => {
+              folderInput.current = el;
+              // Not in React's types. The browser then hands over every file inside, each with its path.
+              el?.setAttribute("webkitdirectory", "");
+            }}
+            type="file"
+            hidden
+            onChange={(e) => {
+              addFiles(pickedFromInput(e.target.files));
+              e.target.value = "";
+            }}
+          />
+
+          {searching && search.error && <ErrorNote>{search.error.message}</ErrorNote>}
+
+          {trouble && (
+            <div className="max-w-lg space-y-3">
+              <ErrorNote>{status === 404 ? "This folder no longer exists." : trouble.message}</ErrorNote>
+              {status === 404 && (
+                <Link to={driveUrl(drive)} className="text-sm text-accent underline underline-offset-2">
+                  Go to the top of {drive}
+                </Link>
+              )}
+            </div>
+          )}
+
+          {(searching ? search.isPending : listing.isPending) && <ListingSkeleton />}
+
+          {everything.length > 0 && (
+            <div className="sticky top-14 z-20 -mx-4 mt-3 flex h-12 items-center gap-2 bg-paper px-4 @3xl:-mx-8 @3xl:px-8">
+              <FilterTabs
+                counts={counts}
+                total={everything.length}
+                value={shownFilter}
+                onChange={(next) => {
+                  setFilter(next);
+                  clearSelection();
+                  setCursor(null);
                 }}
-                className="w-full rounded-md border border-line bg-surface py-2 pl-9 pr-3 text-sm text-ink placeholder:text-muted focus:border-teal"
               />
-            </label>
-            <div className="ml-auto flex items-center gap-2 sm:ml-0">
               <SortMenu sort={sort} onChange={changeSort} relevance={searching} onRelevance={() => setSearchSort(null)} />
               <ViewToggle view={view} onChange={changeView} />
             </div>
-            <button
-              type="button"
-              aria-pressed={showDetails}
-              aria-label="Details panel"
-              title={showDetails ? "Hide details" : "Show details"}
-              onClick={() => setShowDetails(!showDetails)}
-              className={`hidden rounded-md border border-line p-2 xl:inline-flex ${showDetails ? "bg-teal text-teal-ink" : "bg-surface text-muted hover:text-ink"}`}
-            >
-              <PanelRight size={16} />
-            </button>
-          </div>
-
-          {notice && (
-            <p className="mt-4 rounded-md border border-brass/50 bg-brass/10 px-3 py-2 text-sm" role="status">
-              {notice}
-            </p>
           )}
 
-          {undoable && (
-            <div className="mt-4 flex items-center gap-3 rounded-md border border-teal/40 bg-teal/5 px-3 py-2 text-sm" role="status">
-              <span className="mr-auto">
-                Renamed {undoable.length} {undoable.length === 1 ? "item" : "items"}.
-              </span>
-              <Button className="py-1" onClick={() => void undoRename(undoable)}>
-                Undo
-              </Button>
-              <button type="button" onClick={() => setUndoable(null)} aria-label="Dismiss" className={ICON_BUTTON}>
-                <X size={16} />
-              </button>
-            </div>
+          {searching && search.data && !stale && entries.length === 0 && (
+            <Empty icon={<SearchX size={20} aria-hidden="true" />} title="No matches">
+              Nothing in {searched} has a name matching “{query}”.
+            </Empty>
           )}
 
-          {selecting && (
-            <div
-              role="toolbar"
-              aria-label="Selection"
-              className="sticky top-2 z-10 mt-4 flex flex-wrap items-center gap-2 rounded-lg border border-teal/40 bg-surface px-3 py-2 shadow-md"
-            >
-              <span className="text-sm font-medium" aria-live="polite">
-                {chosen.length} selected
-              </span>
-              <span className="mr-auto flex gap-1 text-sm">
-                {!allSelected && (
-                  <button
-                    type="button"
-                    className="rounded px-1.5 py-0.5 text-teal hover:bg-ink/5"
-                    onClick={() => setSelected(new Set(entries.map((x) => x.id)))}
-                  >
-                    All
-                  </button>
-                )}
-                <button
-                  type="button"
-                  className="rounded px-1.5 py-0.5 text-teal hover:bg-ink/5"
-                  title="Select what isn't selected, and unselect what is"
-                  onClick={() => {
-                    setSelected((prev) => new Set(entries.filter((x) => !prev.has(x.id)).map((x) => x.id)));
-                    anchor.current = null;
-                  }}
-                >
-                  Invert
-                </button>
-              </span>
-              {chosen.length === 1 && chosen[0].kind === "file" && (
-                <a
-                  href={api.fileUrl(drive, chosen[0].id)}
-                  download={chosen[0].name}
-                  className="inline-flex items-center gap-2 rounded-md border border-line bg-surface px-3 py-1.5 text-sm font-medium hover:bg-ink/5"
-                >
-                  <Download size={16} />
-                  Download
-                </a>
-              )}
-              {!(chosen.length === 1 && chosen[0].kind === "file") && (
-                <Button className="py-1.5" onClick={() => void downloadZip(chosen)}>
-                  <Download size={16} />
-                  Download zip
-                </Button>
-              )}
-              <Button
-                className="py-1.5"
-                title={chosen.length === 1 ? "Rename (F2)" : "Rename them all at once: find and replace, numbering, patterns (F2)"}
-                onClick={() =>
-                  setOpen(chosen.length === 1 ? { type: "rename", entry: chosen[0] } : { type: "bulkRename", ...renameItems(chosen) })
-                }
-              >
-                <Pencil size={16} />
-                {chosen.length === 1 ? "Rename" : "Rename all"}
-              </Button>
-              {chosen.length === 1 && (
-                <Button
-                  className="py-1.5"
-                  title="Find and replace, numbering, patterns"
-                  onClick={() => setOpen({ type: "bulkRename", ...renameItems(chosen) })}
-                >
-                  Advanced rename
-                </Button>
-              )}
-              <Button className="py-1.5" onClick={() => setOpen({ type: "move", entries: chosen })}>
-                <FolderInput size={16} />
-                Move
-              </Button>
-              <Button variant="danger" className="py-1.5" onClick={() => setOpen({ type: "delete", entries: chosen })}>
-                <Trash2 size={16} />
-                Delete
-              </Button>
-              <button type="button" onClick={clearSelection} aria-label="Clear selection" className={ICON_BUTTON}>
-                <X size={18} />
-              </button>
-            </div>
+          {!searching && listing.data && entries.length === 0 && (
+            <Empty icon={<Upload size={20} aria-hidden="true" />} title="This folder is empty">
+              Drop files or folders anywhere on this page, or add some.
+            </Empty>
           )}
 
-          <div
-            className={`mt-4 rounded-lg border ${dragging ? "border-dashed border-teal bg-teal/5" : "border-transparent"}`}
-          >
-            {searching && (
-              <p className="pb-3 text-sm text-muted" aria-live="polite">
-                {search.isPending
-                  ? "Searching…"
-                  : search.error
-                    ? ""
-                    : search.data && search.data.total > search.data.results.length
-                      ? `Showing the best ${search.data.results.length} of ${search.data.total} matches in ${drive}.`
-                      : `${search.data?.total ?? 0} ${search.data?.total === 1 ? "match" : "matches"} in ${drive}.`}
-              </p>
-            )}
-            {searching && search.error && <ErrorNote>{search.error.message}</ErrorNote>}
+          {entries.length > 0 && view === "list" && (
+            <ListView
+              {...listingProps}
+              sort={sort}
+              onSort={(key) => changeSort(sortByColumn(sort ?? { ...DEFAULT_SORT, key: "type" }, key))}
+              onSelectAll={() => (allSelected ? clearSelection() : selectAll())}
+              onDownloadZip={(entry) => void downloadZip([entry])}
+            />
+          )}
 
-            {!searching && listing.isPending && <p className="py-10 text-muted">Loading…</p>}
-
-            {!searching && listing.error && !driveLocked && status !== 401 && (
-              <div className="space-y-3 py-6">
-                <ErrorNote>{status === 404 ? "This folder no longer exists." : listing.error.message}</ErrorNote>
-                {status === 404 && (
-                  <Link to={driveUrl(drive)} className="text-sm text-teal underline underline-offset-2">
-                    Go to the top of {drive}
-                  </Link>
-                )}
-              </div>
-            )}
-
-            {searching && search.data && entries.length === 0 && (
-              <p className="border-y border-line py-12 text-muted">
-                Nothing in {drive} has a name matching “{query}”.
-              </p>
-            )}
-
-            {!searching && listing.data && entries.length === 0 && (
-              <p className="border-y border-line py-12 text-muted">
-                {dragging
-                  ? "Drop to upload here."
-                  : "This folder is empty. Drop files or folders here, or choose Upload files."}
-              </p>
-            )}
-
-            {entries.length > 0 && view === "list" && (
-              <>
-                <div className="flex items-center gap-3 border-t border-line px-1 py-2 text-xs font-medium uppercase tracking-wide text-muted">
-                  <input
-                    type="checkbox"
-                    aria-label="Select all"
-                    checked={allSelected}
-                    ref={(el) => {
-                      if (el) el.indeterminate = selecting && !allSelected;
-                    }}
-                    onChange={() => (allSelected ? clearSelection() : setSelected(new Set(entries.map((e) => e.id))))}
-                    className="h-4 w-4 accent-[var(--teal)]"
-                  />
-                  <span className="flex flex-1 pl-[52px]">{column("name", "Name")}</span>
-                  <span className="hidden w-24 justify-end sm:flex">{column("size", "Size")}</span>
-                  <span className="hidden w-28 justify-end md:flex">{column("created", "Added")}</span>
-                  <span className="w-[68px]" aria-hidden="true" />
-                </div>
-                <ul className="divide-y divide-line border-y border-line">
-                  {entries.map((entry, i) => (
-                    <li
-                      key={entry.id}
-                      data-entry={entry.id}
-                      aria-current={cursor === entry.id || undefined}
-                      className={`flex scroll-my-16 items-center gap-3 pl-1 ${selected.has(entry.id) ? "bg-teal/10" : "hover:bg-ink/[0.03]"} ${cursor === entry.id ? "outline-2 -outline-offset-2 outline-teal/70" : ""}`}
-                    >
-                      {checkbox(entry, i)}
-                      <Opener
-                        drive={drive}
-                        entry={entry}
-                        onClick={claimClick(i)}
-                        onPreview={() => setOpen({ type: "preview", entry })}
-                        className="flex min-w-0 flex-1 items-center gap-3 py-2"
-                      >
-                        <Thumb drive={drive} entry={entry} />
-                        <span className="min-w-0">
-                          <span className={`block truncate ${entry.kind === "dir" ? "font-medium" : ""}`}>
-                            {entry.name}
-                          </span>
-                          {locations.has(entry.id) && (
-                            <span className="block truncate text-xs text-muted">
-                              {where(drive, locations.get(entry.id) ?? [])}
-                            </span>
-                          )}
-                        </span>
-                      </Opener>
-
-                      <span className="hidden w-24 shrink-0 text-right text-sm tabular-nums text-muted sm:block">
-                        {entry.kind === "file" ? formatSize(entry.size) : ""}
-                      </span>
-                      <span className="hidden w-28 shrink-0 text-right text-sm text-muted md:block">
-                        {formatDate(entry.created_at)}
-                      </span>
-
-                      <div className="flex shrink-0 items-center">
-                        {entry.kind === "file" ? (
-                          <a
-                            href={api.fileUrl(drive, entry.id)}
-                            download={entry.name}
-                            aria-label={`Download ${entry.name}`}
-                            title="Download"
-                            className={ICON_BUTTON}
-                          >
-                            <Download size={18} />
-                          </a>
-                        ) : (
-                          <button
-                            type="button"
-                            onClick={() => void downloadZip([entry])}
-                            aria-label={`Download ${entry.name} as zip`}
-                            title="Download as zip"
-                            className={ICON_BUTTON}
-                          >
-                            <Download size={18} />
-                          </button>
-                        )}
-                        {itemMenu(entry)}
-                      </div>
-                    </li>
-                  ))}
-                </ul>
-              </>
-            )}
-
-            {entries.length > 0 && view === "grid" && (
-              <ul ref={gridRef} className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
-                {entries.map((entry, i) => {
-                  const isSelected = selected.has(entry.id);
-                  return (
-                    <li
-                      key={entry.id}
-                      data-entry={entry.id}
-                      aria-current={cursor === entry.id || undefined}
-                      className={`group relative scroll-my-16 rounded-lg border bg-surface ${isSelected ? "border-teal ring-2 ring-teal" : "border-line hover:border-muted"} ${cursor === entry.id ? "outline-2 outline-offset-2 outline-teal/70" : ""}`}
-                    >
-                      <Opener
-                        drive={drive}
-                        entry={entry}
-                        onClick={claimClick(i)}
-                        onPreview={() => setOpen({ type: "preview", entry })}
-                        className="block w-full"
-                      >
-                        <Thumb drive={drive} entry={entry} large />
-                        <span className="block px-2.5 py-2">
-                          <span className={`block truncate text-sm ${entry.kind === "dir" ? "font-medium" : ""}`}>
-                            {entry.name}
-                          </span>
-                          <span className="block truncate text-xs text-muted">
-                            {locations.has(entry.id)
-                              ? where(drive, locations.get(entry.id) ?? [])
-                              : entry.kind === "file"
-                                ? formatSize(entry.size)
-                                : "Folder"}
-                          </span>
-                        </span>
-                      </Opener>
-                      <span
-                        className={`absolute left-2 top-2 flex rounded bg-surface/90 p-1 shadow-sm ${selecting || isSelected ? "" : "opacity-0 focus-within:opacity-100 group-hover:opacity-100 [@media(hover:none)]:opacity-100"}`}
-                      >
-                        {checkbox(entry, i)}
-                      </span>
-                      <span className="absolute right-1 top-1 rounded-md bg-surface/90 opacity-0 shadow-sm focus-within:opacity-100 group-hover:opacity-100 [@media(hover:none)]:opacity-100">
-                        {itemMenu(entry)}
-                      </span>
-                    </li>
-                  );
-                })}
-              </ul>
-            )}
-
-            {entries.length > 0 && (
-              <p className="mt-3 text-xs text-muted">
-                Ctrl/Cmd-click or Shift-click to select several. Arrows move, Enter opens, Space selects, Shift+arrows
-                select a range, Backspace goes up, and typing jumps to a name. Ctrl/Cmd+A selects everything, Delete
-                deletes, F2 renames (several at once, too), / searches.
-              </p>
-            )}
-          </div>
+          {entries.length > 0 && view === "grid" && <GridView {...listingProps} />}
         </main>
 
-        {showDetails && (
-          <DetailsPanel
-            drive={drive}
-            chosen={chosen}
-            here={searching ? `Matches for “${query}”` : crumbs.length ? crumbs[crumbs.length - 1].name : drive}
-            entries={entries}
-            locationOf={locationOf}
-            onClose={() => setShowDetails(false)}
-          />
-        )}
-      </div>
+        <Dock>
+          {notice && (
+            <Toast>
+              <span className="min-w-0">{notice}</span>
+              <button type="button" onClick={() => setNotice(null)} aria-label="Dismiss" className={ICON_BUTTON}>
+                <X size={16} />
+              </button>
+            </Toast>
+          )}
+          {undoable && (
+            <Toast>
+              <span className="min-w-0 truncate">
+                Renamed {undoable.length} {undoable.length === 1 ? "item" : "items"}
+              </span>
+              <span className="flex items-center">
+                <Button size="sm" onClick={() => void undoRename(undoable)}>
+                  Undo
+                </Button>
+                <button type="button" onClick={() => setUndoable(null)} aria-label="Dismiss" className={`${ICON_BUTTON} ml-1`}>
+                  <X size={16} />
+                </button>
+              </span>
+            </Toast>
+          )}
+          {making && (
+            <Toast>
+              <Images size={16} className="shrink-0 text-muted" aria-hidden="true" />
+              <span className="min-w-0 truncate tabular-nums">
+                Making thumbnails, {making.done} of {making.total}
+              </span>
+              <span
+                className="hidden h-1 w-28 shrink-0 overflow-hidden rounded-full bg-ink/10 @lg:block"
+                aria-hidden="true"
+              >
+                <span
+                  className="block h-full rounded-full bg-accent transition-[width]"
+                  style={{ width: `${(making.done / making.total) * 100}%` }}
+                />
+              </span>
+              <Button size="sm" onClick={stopMakingThumbnails}>
+                Stop
+              </Button>
+            </Toast>
+          )}
+          {selecting ? (
+            <SelectionBar
+              drive={drive}
+              chosen={chosen}
+              allSelected={allSelected}
+              onSelectAll={selectAll}
+              onInvert={() => {
+                setSelected((prev) => new Set(entries.filter((x) => !prev.has(x.id)).map((x) => x.id)));
+                anchor.current = null;
+              }}
+              onClear={clearSelection}
+              onDownloadZip={() => void downloadZip(chosen)}
+              onRename={() => setOpen({ type: "rename", entry: chosen[0] })}
+              onBulkRename={() => setOpen({ type: "bulkRename", ...renameItems(chosen) })}
+              onMove={() => setOpen({ type: "move", entries: chosen })}
+              onDelete={() => setOpen({ type: "delete", entries: chosen })}
+            />
+          ) : (
+            !searching &&
+            !trouble && (
+              <span className="self-end @2xl:hidden">
+                <AddMenu floating {...adds} />
+              </span>
+            )
+          )}
+        </Dock>
+      </Page>
+
+      {showDetails && (
+        <DetailsPanel
+          drive={drive}
+          chosen={chosen}
+          here={searching ? `Matches for “${query}”` : here}
+          entries={entries}
+          locationOf={locationOf}
+          onClose={() => setShowDetails(false)}
+        />
+      )}
+
+      {dragging && (
+        <div className="pointer-events-none fixed inset-2 z-40 flex items-center justify-center rounded-2xl border-2 border-dashed border-accent bg-paper/85 lg:absolute lg:inset-0">
+          <div className="max-w-full px-6 text-center">
+            <Upload size={28} className="mx-auto text-accent" aria-hidden="true" />
+            <p className="mt-3 truncate text-lg font-semibold">Drop to upload to {here}</p>
+            <p className="mt-1 text-sm text-muted">Files, or whole folders.</p>
+          </div>
+        </div>
+      )}
 
       {open?.type === "newFolder" && (
         <NameDialog
@@ -1351,6 +1146,7 @@ export default function BrowserPage() {
       {open?.type === "deleteDrive" && (
         <DeleteDriveDialog drive={drive} isProtected={info?.protected ?? true} onClose={close} onDeleted={leaveDrive} />
       )}
-    </div>
+      {open?.type === "shortcuts" && <ShortcutsDialog onClose={close} />}
+    </>
   );
 }

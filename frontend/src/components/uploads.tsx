@@ -5,6 +5,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { api, ApiError, sendUpload, type Entry, type QueuedUpload, type UploadStatus, type UploadWait } from "../api";
 import { formatDuration, formatSize } from "../format";
 import { infoKey } from "../fileinfo";
+import { useSavedFlag } from "../saved";
 import { sendDetails } from "../thumbs";
 import { ICON_BUTTON } from "./ui";
 
@@ -105,6 +106,9 @@ const keyOf = (id: number) => `${CLIENT}:${id}`;
 /** The shared line: its order, and the uploads other tabs (on this device or others) are sending. */
 type Line = { order: string[]; others: Map<string, QueuedUpload> };
 const EMPTY_LINE: Line = { order: [], others: new Map() };
+
+/** The tab's title (as in index.html) when nothing is uploading. */
+const PAGE_TITLE = "tgdrive";
 
 /** Whether the panel is folded down to its header, remembered in this browser. */
 const MINIMIZED_KEY = "tgdrive.uploadsMinimized";
@@ -746,21 +750,17 @@ export function UploadsProvider({ children }: { children: ReactNode }) {
     return () => window.removeEventListener("beforeunload", warn);
   }, [sending]);
 
-  const [minimized, setMinimized] = useState(() => {
-    try {
-      return localStorage.getItem(MINIMIZED_KEY) === "1";
-    } catch {
-      return false;
-    }
-  });
-  function toggleMinimized() {
-    setMinimized(!minimized);
-    try {
-      localStorage.setItem(MINIMIZED_KEY, minimized ? "0" : "1");
-    } catch {
-      /* private mode: the choice just isn't remembered */
-    }
-  }
+  // In the tab's title too, for when another tab is in front. Rounded down: 100% is all of it.
+  const uploaded = busy ? Math.floor(percentOf(tally(shown).stored, tally(shown).total)) : null;
+  useEffect(() => {
+    if (uploaded === null) return;
+    document.title = `${uploaded}% uploaded · ${PAGE_TITLE}`;
+    return () => {
+      document.title = PAGE_TITLE;
+    };
+  }, [uploaded]);
+
+  const [minimized, setMinimized] = useSavedFlag(MINIMIZED_KEY);
 
   const value = useMemo(() => ({ enqueue, renameDrive, adopt }), [enqueue, renameDrive, adopt]);
 
@@ -770,13 +770,13 @@ export function UploadsProvider({ children }: { children: ReactNode }) {
       {rows.length > 0 && (
         <section
           aria-label="Uploads"
-          className="fixed inset-x-3 bottom-3 z-30 rounded-xl border border-line bg-surface shadow-xl sm:left-auto sm:right-5 sm:w-96"
+          className="fixed inset-x-3 bottom-[calc(var(--dock,0px)+0.75rem)] z-40 overflow-hidden rounded-2xl border border-line bg-surface shadow-xl shadow-black/25 transition-[bottom] duration-200 sm:left-auto sm:right-6 sm:w-96 sm:bottom-[calc(var(--dock,0px)+1.5rem)]"
         >
           <Summary
             items={shown}
             clock={clock}
             minimized={minimized}
-            onToggle={toggleMinimized}
+            onToggle={() => setMinimized(!minimized)}
             onCancelAll={cancelAll}
             onDismiss={dismissAll}
           />
@@ -818,6 +818,22 @@ function fromLine(u: QueuedUpload, movedBefore: number): Item {
   };
 }
 
+const percentOf = (bytes: number, total: number) => (total > 0 ? Math.min(100, (bytes / total) * 100) : 100);
+
+/** How far the whole lot has got: everything uploaded or still going; not what was
+ * cancelled, failed or is waiting for its file. */
+function tally(items: Item[]) {
+  const counted = items.filter((item) => item.status === "done" || ACTIVE.includes(item.status));
+  const sum = (bytes: (item: Item) => number) => counted.reduce((n, item) => n + bytes(item), 0);
+  return {
+    count: counted.length,
+    done: counted.filter((item) => item.status === "done").length,
+    total: sum((item) => item.size),
+    sent: sum((item) => (item.status === "done" ? item.size : item.sent)),
+    stored: sum((item) => (item.status === "done" ? item.size : item.stored)),
+  };
+}
+
 /** The panel's header: how far the whole lot has got, a way to stop it, and to fold the list away. */
 function Summary({
   items,
@@ -842,33 +858,27 @@ function Summary({
     if (!busy) setConfirming(false);
   }, [busy]);
 
-  // Everything uploaded or still going; not what was cancelled, failed or is waiting for its file.
-  const counted = items.filter((item) => item.status === "done" || ACTIVE.includes(item.status));
-  const total = counted.reduce((sum, item) => sum + item.size, 0);
-  const sent = counted.reduce((sum, item) => sum + (item.status === "done" ? item.size : item.sent), 0);
-  const stored = counted.reduce((sum, item) => sum + (item.status === "done" ? item.size : item.stored), 0);
-  const done = counted.filter((item) => item.status === "done").length;
+  const { count, done, total, sent, stored } = tally(items);
   const moved = items.reduce((sum, item) => sum + item.moved, 0);
   const ms = clock.spent + (clock.since === null ? 0 : now - clock.since);
   const speed = ms >= 1000 && moved > 0 ? (moved * 1000) / ms : null;
   const left = speed && busy ? formatDuration((total - stored) / speed) + " left" : null;
-  const percent = (bytes: number) => (total > 0 ? Math.min(100, (bytes / total) * 100) : 100);
   const waiting = items.filter((item) => item.status === "interrupted").length;
   // With the list folded away, these are the rows that would otherwise go unnoticed.
   const failed = items.filter((item) => item.status === "error").length;
   const attention = minimized
-    ? [failed > 0 && `${failed} failed`, waiting > 0 && counted.length > 0 && `${waiting} unfinished`]
+    ? [failed > 0 && `${failed} failed`, waiting > 0 && count > 0 && `${waiting} unfinished`]
     : [];
 
   let title: string;
-  if (busy) title = counted.length > 1 ? `Uploaded ${done} of ${counted.length} files` : "Uploading 1 file";
-  else if (waiting > 0 && counted.length === 0) title = `${waiting} unfinished ${waiting === 1 ? "upload" : "uploads"}`;
+  if (busy) title = count > 1 ? `Uploaded ${done} of ${count} files` : "Uploading 1 file";
+  else if (waiting > 0 && count === 0) title = `${waiting} unfinished ${waiting === 1 ? "upload" : "uploads"}`;
   else title = "Uploads finished";
 
   return (
-    <div className="border-b border-line px-4 py-2.5">
+    <div className={`px-4 py-2.5 ${minimized ? "" : "border-b border-line"}`}>
       <div className="flex items-center justify-between gap-2">
-        <h2 className="text-sm font-semibold" aria-live="polite">
+        <h2 className="truncate text-sm font-medium" aria-live="polite">
           {title}
         </h2>
         <div className="flex items-center gap-1">
@@ -882,14 +892,14 @@ function Summary({
                     setConfirming(false);
                     onCancelAll();
                   }}
-                  className="rounded-md px-2 py-1 font-medium text-danger hover:bg-danger/10"
+                  className="rounded-lg px-2 py-1 font-medium text-danger hover:bg-danger/10"
                 >
                   Yes
                 </button>
                 <button
                   type="button"
                   onClick={() => setConfirming(false)}
-                  className="rounded-md px-2 py-1 font-medium text-muted hover:bg-ink/5 hover:text-ink"
+                  className="rounded-lg px-2 py-1 font-medium text-muted hover:bg-ink/5 hover:text-ink"
                 >
                   No
                 </button>
@@ -898,7 +908,7 @@ function Summary({
               <button
                 type="button"
                 onClick={() => setConfirming(true)}
-                className="rounded-md px-2 py-1 text-xs font-medium text-muted hover:bg-ink/5 hover:text-ink"
+                className="rounded-lg px-2 py-1 text-xs font-medium text-muted hover:bg-ink/5 hover:text-ink"
               >
                 Cancel all
               </button>
@@ -921,7 +931,7 @@ function Summary({
           </button>
         </div>
       </div>
-      {(counted.length > 1 || (minimized && counted.length > 0)) && (
+      {(count > 1 || (minimized && count > 0)) && (
         <>
           <p className="text-xs text-muted">
             {[
@@ -935,8 +945,8 @@ function Summary({
           </p>
           {busy && (
             <Bar
-              sent={percent(sent)}
-              stored={percent(stored)}
+              sent={percentOf(sent, total)}
+              stored={percentOf(stored, total)}
               label="Overall upload progress"
               text={`${formatSize(stored)} of ${formatSize(total)} stored`}
             />
@@ -959,8 +969,8 @@ function Bar({ sent, stored, label, text }: { sent: number; stored: number; labe
       aria-valuetext={text}
       aria-label={label}
     >
-      <div className="absolute inset-y-0 left-0 rounded-full bg-teal/35" style={{ width: `${sent}%` }} />
-      <div className="absolute inset-y-0 left-0 rounded-full bg-teal" style={{ width: `${stored}%` }} />
+      <div className="absolute inset-y-0 left-0 rounded-full bg-accent/35" style={{ width: `${sent}%` }} />
+      <div className="absolute inset-y-0 left-0 rounded-full bg-accent" style={{ width: `${stored}%` }} />
     </div>
   );
 }
@@ -1004,7 +1014,7 @@ function UploadRow({
   const picker = useRef<HTMLInputElement>(null);
   const [mismatch, setMismatch] = useState<string | null>(null);
   const secondsTo = (until: number) => Math.max(0, Math.ceil((until - now) / 1000));
-  const percent = (bytes: number) => (item.size > 0 ? Math.min(100, (bytes / item.size) * 100) : 100);
+  const percent = (bytes: number) => percentOf(bytes, item.size);
   const running = ACTIVE.includes(item.status);
   const speed = item.speed ? `${formatSize(item.speed)}/s` : null;
 
@@ -1054,7 +1064,7 @@ function UploadRow({
     <li className="px-4 py-2.5">
       <div className="flex items-center gap-2">
         <div className="min-w-0 flex-1">
-          <p className="truncate text-sm">{item.name}</p>
+          <p className="truncate text-[13px]">{item.name}</p>
           <p
             className={`text-xs ${item.status === "error" ? "text-danger" : trouble ? "text-brass" : "text-muted"}`}
             aria-live={trouble ? "polite" : undefined}
@@ -1063,7 +1073,7 @@ function UploadRow({
             {other && <span className="text-muted"> · Another tab or device</span>}
           </p>
         </div>
-        {item.status === "done" && <Check size={16} className="shrink-0 text-teal" aria-label="Uploaded" />}
+        {item.status === "done" && <Check size={16} className="shrink-0 text-accent" aria-label="Uploaded" />}
         {item.status === "offline" && <WifiOff size={16} className="shrink-0 text-brass" aria-hidden="true" />}
         {item.status === "error" && (
           <>
