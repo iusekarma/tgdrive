@@ -259,13 +259,14 @@ frame at `frameTime()` (a tenth of the way in, at least 3 s and at most
 3 min, never past halfway), or a comic's (.cbz) first page in name order,
 read from the zip's index with `zip.ts` (which takes a local `Blob` as
 well as a URL), or audio's cover art, read from its tags with
-`player/cover.ts` (Mediabunny: MP3, FLAC, M4A, Ogg, WAV), onto a canvas scaled to 320 px and `PUT`s it
+`player/cover.ts` (Mediabunny: MP3, FLAC, M4A, Ogg, WAV), or a PDF's first
+page, drawn by `pdf/` ([below](#pdf)), onto a canvas scaled to 320 px and `PUT`s it
 as WebP (PNG where WebP encoding is unsupported). The server re-encodes
 whatever it receives. This means Telegram is never asked for a file just to
 thumbnail it.
 
 A file opened in the viewer without one gets one: `sendPicture()` from the
-image shown, `sendVideoFrame()` from a hidden second player seeking to
+image shown, `sendPdfPage()` from a PDF fetched whole (up to 200 MB), `sendVideoFrame()` from a hidden second player seeking to
 `frameTime()` (so it doesn't matter where the user is watching), or, for
 MPEG-TS, `sendFrame()` from the player once it gets there.
 `regenerateThumbnail()` (**Regenerate thumbnail** in a file's menu) deletes
@@ -274,10 +275,10 @@ image up to 50 MB on the server, so the browser downloads nothing. `useThumbnail
 lets anything showing the old one load the new one.
 
 **Make thumbnails** under a folder's name (with how many it lacks) runs `makeThumbnail()` on each image,
-video, comic and audio file there without one, `MAKE_PARALLEL` (3) at a time. Images the server can thumbnail
+video, comic, PDF and audio file there without one, `MAKE_PARALLEL` (3) at a time. Images the server can thumbnail
 (up to 50 MB) are left to it, so the browser doesn't download them; larger
-ones, videos, comics and audio are drawn from the server's copy, a video read only as far as its
-frame (`preload="metadata"`), a comic only its index and first page (which the server fetches together:
+ones, videos, comics, PDFs and audio are drawn from the server's copy, a video read only as far as its
+frame (`preload="metadata"`), a comic or PDF only its index and first page (which the server fetches together:
 `api.fileUrlAhead`), audio only its tags. Audio found to have no cover art is
 remembered for as long as the tab is open (`hasNoCover()`) and not looked at again. An `AbortController` stops it when the folder,
 drive or search changes; closing the tab stops it anyway. Files whose
@@ -287,11 +288,30 @@ those to Telegram itself.
 In the listing, a thumbnail is asked for once its row has been drawn for
 100 ms, so scrolling fast through a long folder doesn't queue up all it
 passes. Thumbnails are fitted inside their box (`object-contain`),
-and a video's, comic's or audio file's carries a small badge (`KindBadge`) so it isn't
+and a video's, comic's, PDF's or audio file's carries a small badge (`KindBadge`) so it isn't
 mistaken for a picture.
 
 The same decode yields the file's details (dimensions, length, EXIF date
 and camera, last-modified time), sent with one `PUT /files/{id}/info`.
+
+## pdf/
+
+`firstPage()` (`page.ts`) draws a PDF's first page in a worker of its own
+(`worker.ts`), which runs PDFium (`@embedpdf/pdfium`, WebAssembly, loaded only
+then) and ends with the page, or after 60 s (20 s for a local copy).
+
+A PDF ends with its index, so the start of the file is rarely enough: PDFium
+asks for the bytes it needs, synchronously, and the worker answers with range
+requests (synchronous `XMLHttpRequest`) or slices of the local copy, a
+mebibyte at a time, more when it reads on. A large PDF usually costs the
+server two chunks from Telegram, the first and the last, fetched together
+(`api.fileUrlAhead`), plus the one with the first page if it is elsewhere.
+(pdf.js isn't used because it loads every page's entry, often spread over the
+whole file, to open one.)
+
+There is no thumbnail if it needs a password, is damaged, is 2 GiB or more, or
+would take more than 64 MiB to draw (PDFium searches a damaged file from end to
+end), nor if any read failed, as the page would have holes in it.
 
 ## fileinfo.ts
 

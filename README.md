@@ -8,7 +8,7 @@ preview and search them, all behind one master password. Each drive can also
 have a password of its own.
 
 - End-to-end encrypted: Telegram only ever sees encrypted chunks
-- Web UI with folders (upload whole folders), uploads that resume after a dropped connection, search, thumbnails for images, videos, comics and audio (cover art), a full-window viewer (images, video including MPEG-TS, with a choice of audio and subtitle tracks, audio, PDF, text, zip contents, CBZ comics read a page at a time), range downloads (video seeking), and folders or several files downloaded as one zip
+- Web UI with folders (upload whole folders), uploads that resume after a dropped connection, search, thumbnails for images, videos, comics, PDFs and audio (cover art), a full-window viewer (images, video including MPEG-TS, with a choice of audio and subtitle tracks, audio, PDF, text, zip contents, CBZ comics read a page at a time), range downloads (video seeking), and folders or several files downloaded as one zip
 - Several drives, each optionally protected by its own password
 - Mount any drive as a network drive over WebDAV (Windows, macOS, Linux, rclone)
 - Recovery keys for every password
@@ -391,14 +391,14 @@ upload is discarded after an hour without progress, or when the server
 restarts. If some of the files you pick are already in the folder (same name
 and size), it asks whether to skip them and upload the rest.
 
-**Thumbnails.** Your browser makes thumbnails of images, videos, comics and
-audio right after uploading them; a video's is a frame a tenth of the way in
-(at least 3 seconds, at most 3 minutes), a comic's is its first page, and
-audio's is the cover art in its tags, if it has any. An image or video opened
+**Thumbnails.** Your browser makes thumbnails of images, videos, comics,
+PDFs and audio right after uploading them; a video's is a frame a tenth of the way in
+(at least 3 seconds, at most 3 minutes), a comic's or PDF's is its first page, and
+audio's is the cover art in its tags, if it has any. An image, video or PDF (up to 200 MB) opened
 in the viewer without one gets one then, and images uploaded other ways get one made on the server when
 first shown (up to 50 MB). **Regenerate thumbnail** in a file's menu makes a
 new one, and **Make thumbnails** in a folder makes them, three at a time, for the
-images, videos, comics and audio there that have none (it stops when you leave the folder). Thumbnails are encrypted with their file's key and kept in the
+images, videos, comics, PDFs and audio there that have none (it stops when you leave the folder). Thumbnails are encrypted with their file's key and kept in the
 channel, a few hundred to a message so they cost almost nothing against
 Telegram's rate limits, and cached on the server.
 

@@ -250,7 +250,7 @@ once.
 ```mermaid
 flowchart TD
     subgraph BR["Made in the browser (normal path)"]
-        U1["upload finishes"] --> U2["draw image / video frame /<br/>comic page / cover art<br/>onto a 320px canvas"] --> U3["PUT /files/{id}/thumbnail"]
+        U1["upload finishes"] --> U2["draw image / video frame /<br/>comic or PDF page / cover art<br/>onto a 320px canvas"] --> U3["PUT /files/{id}/thumbnail"]
     end
     subgraph SV["Made on the server (fallback for images)"]
         G1["GET /files/{id}/thumbnail"] --> G2{"cached?"}
@@ -270,7 +270,8 @@ flowchart TD
 ```
 
 The viewer makes one for a file opened without one: from the image it
-shows, or from a frame read by a hidden second player for a video.
+shows, from a PDF it fetched whole, or from a frame read by a hidden second
+player for a video.
 **Regenerate thumbnail** sends `DELETE /files/{id}/thumbnail` and then
 lets the server make an image's (up to 50 MB) on the next GET; the rest
 are drawn in the browser.

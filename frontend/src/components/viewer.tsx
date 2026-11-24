@@ -12,7 +12,7 @@ import { api, type Entry, type FileInfo } from "../api";
 import { seconds, useLearn } from "../fileinfo";
 import { formatDate, formatSize, isConvertedImage, isTransportStream, previewKind } from "../format";
 import { useSavedFlag } from "../saved";
-import { frameTime, sendFrame, sendPicture, sendVideoFrame } from "../thumbs";
+import { frameTime, sendFrame, sendPdfPage, sendPicture, sendVideoFrame } from "../thumbs";
 import { byName, junk, listZip, pageType, readZipEntry, zipEntryStart, type ZipEntry } from "../zip";
 import { sidecarTag } from "../player/subtitles";
 import { EntryDetails } from "./details";
@@ -66,7 +66,7 @@ function useLoadedFile(url: string, enabled: boolean, type?: string) {
     return () => controller.abort();
   }, [url, enabled, type]);
   const src = useObjectUrl(blob);
-  return { src, loaded, failed };
+  return { src, blob, loaded, failed };
 }
 
 function Unplayable({ what }: { what: string }) {
@@ -918,6 +918,16 @@ function Stage({
     pdfInMemory ? "application/pdf" : undefined,
   );
   const [framed, setFramed] = useState(false);
+
+  // A PDF opened without a thumbnail: the file is here, so make it one.
+  const pdf = pdfInMemory ? file.blob : null;
+  useEffect(() => {
+    if (!pdf || pictured.current) return;
+    pictured.current = true;
+    void sendPdfPage(drive, entry.id, pdf).then((sent) => {
+      if (sent) void queryClient.invalidateQueries({ queryKey: ["nodes", drive] });
+    });
+  }, [drive, entry.id, pdf, queryClient]);
 
   if (kind === "image") {
     if (failed || file.failed) return <Unplayable what="image" />;

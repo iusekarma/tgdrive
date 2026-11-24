@@ -169,8 +169,9 @@ also serves the built frontend:
   as `/d/Photos/<folder-id>` survive a reload.
 - `index.html` is sent with a strict Content-Security-Policy: scripts only
   from the same origin, no inline script, `blob:` allowed only for images,
-  media (decrypted thumbnails and previews) and workers, WebAssembly allowed
-  (both for the player's audio decoders), `frame-ancestors 'none'`.
+  media (decrypted thumbnails and previews), frames (PDFs in the viewer) and
+  workers, WebAssembly allowed (these two for the player's audio decoders),
+  `frame-ancestors 'none'`.
 
 In development, Vite serves the UI on port 5173 and proxies `/api` and
 `/dav` to FastAPI on 8000, so cookies stay same-origin.

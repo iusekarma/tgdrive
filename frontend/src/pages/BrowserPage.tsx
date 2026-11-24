@@ -520,9 +520,9 @@ export default function BrowserPage() {
     return { items: list, others };
   }
 
-  /** Images, videos, comics and audio (its cover art); others have nothing to draw one from. */
+  /** Images, videos, comics, PDFs and audio (its cover art); others have nothing to draw one from. */
   const canThumbnail = (entry: Entry) =>
-    entry.kind === "file" && ["image", "video", "comic", "audio"].includes(previewKind(entry.name, entry.size) ?? "");
+    entry.kind === "file" && ["image", "video", "comic", "pdf", "audio"].includes(previewKind(entry.name, entry.size) ?? "");
 
   const missingThumbnails = searching ? [] : everything.filter((e) => canThumbnail(e) && !e.thumb && !hasNoCover(drive, e.id));
 
@@ -831,7 +831,7 @@ export default function BrowserPage() {
                   <button
                     type="button"
                     onClick={() => void makeThumbnails()}
-                    title={`${missingThumbnails.length} images, videos, comics and audio files here have no thumbnail`}
+                    title={`${missingThumbnails.length} images, videos, comics, PDFs and audio files here have no thumbnail`}
                     className="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-lg bg-ink/6 px-2.5 text-[13px] text-ink transition-colors hover:bg-ink/10"
                   >
                     <Images size={14} aria-hidden="true" />

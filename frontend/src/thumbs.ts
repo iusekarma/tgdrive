@@ -3,6 +3,7 @@ import { useSyncExternalStore } from "react";
 import { api, type Entry, type FileInfo } from "./api";
 import { readExif, seconds } from "./fileinfo";
 import { previewKind } from "./format";
+import { firstPage } from "./pdf/page";
 import { comicPages, listZip, pageType, readZipEntry, type ZipSource } from "./zip";
 
 /** Matches the server: larger images are not fetched from Telegram just to thumbnail them. */
@@ -172,6 +173,20 @@ async function fromComic(
   return (await fromImage(page)).image;
 }
 
+/** A PDF's first page, read from the file without fetching the rest. `opening`
+ * is where to read its start, if not from `source`. */
+async function fromPdf(source: Blob | string, size: number, signal?: AbortSignal, opening?: string): Promise<Blob | null> {
+  // Drawn larger than needed and scaled down, which keeps small text smooth.
+  const page = await firstPage({ source, opening, size, side: SIZE * 2 }, signal);
+  if (!page) return null;
+  const bitmap = await createImageBitmap(page);
+  try {
+    return await toBlob(bitmap, bitmap.width, bitmap.height);
+  } finally {
+    bitmap.close();
+  }
+}
+
 /** The cover art inside an audio file (album art), or null if it has none that can be drawn. */
 async function fromCover(source: Blob | string, size: number, signal?: AbortSignal): Promise<Blob | null> {
   // Mediabunny is large, and only needed here and by the player.
@@ -269,7 +284,7 @@ async function fromAudio(file: Blob): Promise<Look & { coverless: boolean }> {
 export const hasNoCover = (drive: string, id: string) => coverless.has(key(drive, id));
 
 /** Made from the local copy right after an upload, so Telegram is never asked
- * for the file: a thumbnail for images, videos, comics and audio with cover art, and details (dimensions,
+ * for the file: a thumbnail for images, videos, comics, PDFs and audio with cover art, and details (dimensions,
  * duration, when it was taken) for anything. Best effort: formats the browser
  * can't decode get neither. Returns the details as the server now has them. */
 export async function sendDetails(
@@ -280,7 +295,9 @@ export async function sendDetails(
   const kind = previewKind(file.name, file.size);
   const k = key(drive, id);
   let made = () => {};
-  if (kind === "image" || kind === "video" || kind === "comic") making.set(k, new Promise<void>((resolve) => (made = resolve)));
+  if (kind === "image" || kind === "video" || kind === "comic" || kind === "pdf") {
+    making.set(k, new Promise<void>((resolve) => (made = resolve)));
+  }
   let look: Look = { image: null, info: {} };
   let thumb = false;
   try {
@@ -293,6 +310,7 @@ export async function sendDetails(
         look = audio;
       }
       else if (kind === "comic") look = { image: await fromComic(file, file.size), info: {} };
+      else if (kind === "pdf") look = { image: await fromPdf(file, file.size), info: {} };
     } catch {
       // Not decodable here; the file's own date is still worth keeping.
     }
@@ -333,6 +351,11 @@ export function sendPicture(drive: string, id: string, img: HTMLImageElement): P
   return toBlob(img, img.naturalWidth, img.naturalHeight).then((image) => send(drive, id, image), () => false);
 }
 
+/** The same from a PDF the viewer has fetched. */
+export function sendPdfPage(drive: string, id: string, file: Blob): Promise<boolean> {
+  return slot("make", () => fromPdf(file, file.size)).then((image) => send(drive, id, image), () => false);
+}
+
 /** Saves the frame a video element is showing (one the browser can only play
  * through mpegts.js, which a second element can't seek on its own). */
 export function sendFrame(drive: string, id: string, video: HTMLVideoElement): Promise<boolean> {
@@ -365,9 +388,9 @@ export async function regenerateThumbnail(drive: string, entry: Entry): Promise<
 }
 
 /** For a file that has no thumbnail: images the server can thumbnail are left
- * to it, so the browser doesn't download them; larger ones, videos, comics and
- * audio are drawn here from the server's copy (a video only as far as the
- * frame, a comic only its index and first page, audio only its tags).
+ * to it, so the browser doesn't download them; larger ones, videos, comics,
+ * PDFs and audio are drawn here from the server's copy (a video only as far as
+ * the frame, a comic or PDF only its index and first page, audio only its tags).
  * Resolves to whether there is one now; if not, hasNoCover() says whether that
  * is because the file has none. Stops early when `signal` aborts. */
 export async function makeThumbnail(drive: string, entry: Entry, signal: AbortSignal): Promise<boolean> {
@@ -389,6 +412,9 @@ export async function makeThumbnail(drive: string, entry: Entry, signal: AbortSi
       } else if (kind === "comic") {
         // The index is at the end and the first page usually at the start: have the server fetch both at once.
         image = await fromComic(url, entry.size, signal, api.fileUrlAhead(drive, entry.id, 0));
+      } else if (kind === "pdf") {
+        // The same for its index, and what the first page is made of.
+        image = await fromPdf(url, entry.size, signal, api.fileUrlAhead(drive, entry.id, entry.size - 1));
       } else if (kind === "audio") {
         image = await fromCover(url, entry.size, signal);
         if (!image) coverless.add(key(drive, entry.id));

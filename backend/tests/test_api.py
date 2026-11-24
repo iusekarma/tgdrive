@@ -478,6 +478,8 @@ class StaticUiTest(unittest.TestCase):
                 r = c.get("/")
                 self.assertEqual(r.text, "<html>app</html>")
                 self.assertIn("frame-ancestors 'none'", r.headers["content-security-policy"])
+                # The viewer shows a PDF it has fetched from a blob: URL.
+                self.assertIn("frame-src 'self' blob:", r.headers["content-security-policy"])
                 self.assertEqual(c.get("/d/Photos/abc123").text, "<html>app</html>")
                 self.assertEqual(c.head("/d/Photos/abc123").status_code, 200)
                 r = c.get("/assets/index-abc.js")

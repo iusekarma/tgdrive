@@ -61,6 +61,7 @@ tgdrive/
         ├── thumbs.ts               thumbnail loading and in-browser generation
         ├── format.ts               sizes, dates, preview types, validation constants
         ├── zip.ts                  lists a zip and reads single entries, by range requests
+        ├── pdf/                    draws a PDF's first page (PDFium, in a worker)
         ├── pages/                  DrivesPage (drive list), BrowserPage (file browser)
         └── components/             VaultGate, uploads, Sidebar, viewer, dialogs, UI primitives
 ```

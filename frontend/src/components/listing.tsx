@@ -1,4 +1,4 @@
-import { ArrowDown, ArrowUp, BookOpen, Download, Music, Play } from "lucide-react";
+import { ArrowDown, ArrowUp, BookOpen, Download, FileText, Music, Play } from "lucide-react";
 import {
   useEffect,
   useImperativeHandle,
@@ -62,12 +62,13 @@ const BADGES = {
   video: { Icon: Play, label: "Video" },
   comic: { Icon: BookOpen, label: "Comic" },
   audio: { Icon: Music, label: "Audio" },
+  pdf: { Icon: FileText, label: "PDF" },
 } as const;
 
-/** On a thumbnail, says it isn't simply a picture: a video, or the cover of a comic or album. */
+/** On a thumbnail, says it isn't simply a picture: a video, the cover of a comic or album, or a PDF's first page. */
 function KindBadge({ entry, large }: { entry: Entry; large: boolean }) {
   const kind = previewKind(entry.name, entry.size);
-  if (kind !== "video" && kind !== "comic" && kind !== "audio") return null;
+  if (kind !== "video" && kind !== "comic" && kind !== "audio" && kind !== "pdf") return null;
   const { Icon, label } = BADGES[kind];
   return (
     <span

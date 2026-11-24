@@ -871,7 +871,7 @@ async def delete_thumbnail(node_id: str, drive: Drive = Depends(unlocked_drive),
 # --- web UI ------------------------------------------------------------------
 
 # For the page itself. The app needs no inline script, no third-party origin,
-# and blob: only for thumbnails it has decrypted.
+# and blob: only for what it has fetched or decrypted itself.
 UI_CSP = "; ".join([
     "default-src 'self'",
     # WebAssembly and workers made from a blob: the player's AC-3, DTS and TrueHD decoders.
@@ -882,7 +882,8 @@ UI_CSP = "; ".join([
     "media-src 'self' blob:",
     "font-src 'self' data:",
     "connect-src 'self'",
-    "frame-src 'self'",
+    # blob: for a PDF the viewer has fetched whole.
+    "frame-src 'self' blob:",
     "object-src 'none'",
     "base-uri 'none'",
     "form-action 'self'",
