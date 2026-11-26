@@ -1458,6 +1458,17 @@ class Storage:
         blob = self._node(drive, node_id)["info_enc"]
         return json.loads(crypto.decrypt_info(file_key, node_id, blob)) if blob else {}
 
+    def infos(self, drive: Drive, node_ids: list[str]) -> dict[str, dict]:
+        """info() for many files: {id: details}. Folders, files still being
+        uploaded and ids not in the drive are left out."""
+        found: dict[str, dict] = {}
+        for node_id in dict.fromkeys(node_ids):
+            try:
+                found[node_id] = self.info(drive, node_id)
+            except StorageError:   # a folder, not uploaded yet, or not found
+                continue
+        return found
+
     def set_info(self, drive: Drive, node_id: str, fields: dict) -> dict:
         """Merges `fields` into the file's details and returns them all."""
         merged = {**self.info(drive, node_id), **fields}

@@ -10,6 +10,7 @@ import {
   KeyRound,
   Lock,
   LockOpen,
+  Music,
   Network,
   PanelRight,
   Pencil,
@@ -23,7 +24,8 @@ import {
 import { useEffect, useMemo, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
 
-import { api, ApiError, type Crumb, type DriveInfo, type Entry } from "../api";
+import { api, ApiError, type Crumb, type DriveInfo, type Entry, type FileInfo } from "../api";
+import { infoKey } from "../fileinfo";
 import {
   DeleteDriveDialog,
   DrivePasswordDialog,
@@ -49,7 +51,9 @@ import type { RenameItem } from "../rename";
 import { useSavedFlag } from "../saved";
 import { DEFAULT_SORT, sortByColumn, sortEntries, useSavedSort, type Sort } from "../sorting";
 import { driveUrl, formatSize, previewKind } from "../format";
-import { forgetThumbnails, hasNoCover, makeThumbnail, MAKE_PARALLEL, regenerateThumbnail } from "../thumbs";
+import {
+  forgetThumbnails, hasNoCover, hasNoTags, hasSongInfo, makeThumbnail, MAKE_PARALLEL, readSongDetails, regenerateThumbnail,
+} from "../thumbs";
 
 type Open =
   | { type: "newFolder" }
@@ -208,8 +212,8 @@ export default function BrowserPage() {
     forgetThumbnails(old);
   }, [drive, queryClient]);
 
-  // Making a folder's thumbnails, one file at a time. Leaving the folder stops it.
-  const [making, setMaking] = useState<{ done: number; total: number } | null>(null);
+  // Making a folder's thumbnails, or reading its songs' tags, a few files at a time. Leaving the folder stops it.
+  const [making, setMaking] = useState<{ what: string; done: number; total: number } | null>(null);
   const makingRun = useRef<AbortController | null>(null);
 
   useEffect(() => {
@@ -526,6 +530,63 @@ export default function BrowserPage() {
 
   const missingThumbnails = searching ? [] : everything.filter((e) => canThumbnail(e) && !e.thumb && !hasNoCover(drive, e.id));
 
+  // What is known of the songs here, in one request, to tell which have no details yet.
+  const songIds = useMemo(
+    () => (searching ? [] : everything.filter((e) => e.kind === "file" && previewKind(e.name, e.size) === "audio").map((e) => e.id)),
+    [searching, everything],
+  );
+  const songsKey = ["songInfo", drive, parent, songIds];
+  const songInfo = useQuery({
+    queryKey: songsKey,
+    queryFn: () => api.filesInfo(drive, songIds),
+    enabled: songIds.length > 0,
+    placeholderData: keepPreviousData,
+  });
+  const unreadSongs = songInfo.data
+    ? everything.filter((e) => e.id in songInfo.data && !hasSongInfo(songInfo.data[e.id]) && !hasNoTags(drive, e.id))
+    : [];
+
+  /** Details found while reading a file (a song's tags), for the details panel and the count above. */
+  const learned = (info: FileInfo, id: string) => {
+    queryClient.setQueryData(infoKey(drive, id), info);
+    queryClient.setQueryData<Record<string, FileInfo>>(songsKey, (old) => old && { ...old, [id]: info });
+  };
+
+  /** Reads the tags of the songs here that have none saved, a few at a time,
+   * each only as far as its tags. */
+  async function readSongs() {
+    const todo = unreadSongs;
+    if (makingRun.current || todo.length === 0) return;
+    const run = new AbortController();
+    makingRun.current = run;
+    setNotice(null);
+    setMaking({ what: "Reading song details", done: 0, total: todo.length });
+    let done = 0;
+    let failed = 0;
+    let bare = 0;
+    const rest = todo.values();
+    async function work() {
+      for (const entry of rest) {
+        if (run.signal.aborted) return;
+        const info = await readSongDetails(drive, entry, run.signal);
+        if (run.signal.aborted) return;
+        if (info) learned(info, entry.id);
+        else if (hasNoTags(drive, entry.id)) bare += 1;
+        else failed += 1;
+        done += 1;
+        setMaking({ what: "Reading song details", done, total: todo.length });
+      }
+    }
+    await Promise.all(Array.from({ length: MAKE_PARALLEL }, work));
+    if (run.signal.aborted) return;
+    makingRun.current = null;
+    setMaking(null);
+    const notes = [];
+    if (failed) notes.push(`${failed} of ${todo.length} songs couldn't be read.`);
+    if (bare) notes.push(`${bare} ${bare === 1 ? "song has" : "songs have"} no details in them.`);
+    if (notes.length) setNotice(notes.join(" "));
+  }
+
   /** A few files at a time, so Telegram and the browser's connections stay free for browsing. */
   async function makeThumbnails() {
     const todo = missingThumbnails;
@@ -533,7 +594,7 @@ export default function BrowserPage() {
     const run = new AbortController();
     makingRun.current = run;
     setNotice(null);
-    setMaking({ done: 0, total: todo.length });
+    setMaking({ what: "Making thumbnails", done: 0, total: todo.length });
     let done = 0;
     let failed = 0;
     let bare = 0;
@@ -541,13 +602,13 @@ export default function BrowserPage() {
     async function work() {
       for (const entry of rest) {
         if (run.signal.aborted) return;
-        const made = await makeThumbnail(drive, entry, run.signal);
+        const made = await makeThumbnail(drive, entry, run.signal, learned);
         if (run.signal.aborted) return;
         if (made) refreshSoon(queryClient, drive);
         else if (hasNoCover(drive, entry.id)) bare += 1;
         else failed += 1;
         done += 1;
-        setMaking({ done, total: todo.length });
+        setMaking({ what: "Making thumbnails", done, total: todo.length });
       }
     }
     await Promise.all(Array.from({ length: MAKE_PARALLEL }, work));
@@ -568,7 +629,7 @@ export default function BrowserPage() {
 
   async function remakeThumbnail(entry: Entry) {
     setNotice(null);
-    const made = await regenerateThumbnail(drive, entry);
+    const made = await regenerateThumbnail(drive, entry, learned);
     void refresh();
     if (made) return;
     setNotice(
@@ -839,6 +900,17 @@ export default function BrowserPage() {
                     {missingThumbnails.length === 1 ? "thumbnail" : "thumbnails"}
                   </button>
                 )}
+                {!making && unreadSongs.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => void readSongs()}
+                    title={`Read the title, artist and album of ${unreadSongs.length} ${unreadSongs.length === 1 ? "song" : "songs"} here that don't have them yet`}
+                    className="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-lg bg-ink/6 px-2.5 text-[13px] text-ink transition-colors hover:bg-ink/10"
+                  >
+                    <Music size={14} aria-hidden="true" />
+                    Read details of {unreadSongs.length.toLocaleString()} {unreadSongs.length === 1 ? "song" : "songs"}
+                  </button>
+                )}
               </div>
             </>
           )}
@@ -951,9 +1023,13 @@ export default function BrowserPage() {
           )}
           {making && (
             <Toast>
-              <Images size={16} className="shrink-0 text-muted" aria-hidden="true" />
+              {making.what === "Making thumbnails" ? (
+                <Images size={16} className="shrink-0 text-muted" aria-hidden="true" />
+              ) : (
+                <Music size={16} className="shrink-0 text-muted" aria-hidden="true" />
+              )}
               <span className="min-w-0 truncate tabular-nums">
-                Making thumbnails, {making.done} of {making.total}
+                {making.what}, {making.done} of {making.total}
               </span>
               <span
                 className="hidden h-1 w-28 shrink-0 overflow-hidden rounded-full bg-ink/10 @lg:block"

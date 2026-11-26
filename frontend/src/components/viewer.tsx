@@ -8,11 +8,11 @@ import {
   type KeyboardEvent, type PointerEvent, type ReactNode, type RefObject,
 } from "react";
 
-import { api, type Entry, type FileInfo } from "../api";
-import { seconds, useLearn } from "../fileinfo";
+import { api, type Entry, type FileInfo, type SongInfo } from "../api";
+import { seconds, useFileInfo, useLearn } from "../fileinfo";
 import { formatDate, formatSize, isConvertedImage, isTransportStream, previewKind } from "../format";
 import { useSavedFlag } from "../saved";
-import { frameTime, sendFrame, sendPdfPage, sendPicture, sendVideoFrame } from "../thumbs";
+import { cachedThumbnail, frameTime, loadThumbnail, sendFrame, sendPdfPage, sendPicture, sendVideoFrame } from "../thumbs";
 import { byName, junk, listZip, pageType, readZipEntry, zipEntryStart, type ZipEntry } from "../zip";
 import { sidecarTag } from "../player/subtitles";
 import { EntryDetails } from "./details";
@@ -887,6 +887,89 @@ function ComicPreview({
 /** PDFs up to this size are fetched whole first, with progress; bigger ones stream into the browser's viewer. */
 const PDF_IN_MEMORY = 200 * 1024 * 1024;
 
+/** The song's cover: its own picture, else the thumbnail made of it, else an icon. */
+function useCover(drive: string, entry: Entry, picture: Blob | null) {
+  const [thumb, setThumb] = useState<string | null>(() => (entry.thumb ? cachedThumbnail(drive, entry.id) ?? null : null));
+  useEffect(() => {
+    if (!entry.thumb) return;
+    let live = true;
+    void loadThumbnail(drive, entry.id).then((u) => live && setThumb(u));
+    return () => {
+      live = false;
+    };
+  }, [drive, entry.id, entry.thumb]);
+  const [own, setOwn] = useState<string | null>(null);
+  useEffect(() => {
+    if (!picture) return setOwn(null);
+    const url = URL.createObjectURL(picture);
+    setOwn(url);
+    return () => URL.revokeObjectURL(url);
+  }, [picture]);
+  return own ?? thumb;
+}
+
+/** A song: its cover, title, artist and album above the browser's player.
+ * The tags are read from the file while it starts playing (only the part that
+ * holds them), and saved so the details panel knows them too. */
+function AudioPreview({ drive, entry, url, learn }: {
+  drive: string; entry: Entry; url: string; learn: (fields: FileInfo) => void;
+}) {
+  const known = useFileInfo(drive, entry).data;
+  const [failed, setFailed] = useState(false);
+  const [tags, setTags] = useState<{ picture: Blob | null; song: SongInfo } | null>(null);
+  const learnRef = useRef(learn);
+  learnRef.current = learn;
+  useEffect(() => {
+    const controller = new AbortController();
+    void import("../player/cover")
+      .then(({ songTags }) => songTags(api.fileUrl(drive, entry.id), entry.size, controller.signal))
+      .then(
+        ({ images, song }) => {
+          setTags({ picture: images[0] ?? null, song });
+          if (Object.keys(song).length > 0) learnRef.current(song);
+        },
+        () => undefined,   // not readable here, or closed: what is known already is shown
+      );
+    return () => controller.abort();
+  }, [drive, entry.id, entry.size]);
+  const cover = useCover(drive, entry, tags?.picture ?? null);
+  const song = { ...known, ...tags?.song };
+  const title = song.title ?? entry.name;
+  const artist = song.artist ?? song.album_artist;
+  const more = [
+    song.album,
+    song.year,
+    song.track && `Track ${song.track}`,
+    song.disc && song.disc !== "1" && song.disc !== "1/1" && `Disc ${song.disc}`,
+    song.genre,
+  ].filter(Boolean);
+  if (failed) return <Unplayable what="audio file" />;
+  return (
+    <div className="flex w-full max-w-lg flex-col items-center gap-5 px-4">
+      <div className="flex aspect-square w-full max-w-[min(20rem,45vh)] items-center justify-center overflow-hidden rounded-2xl bg-white/5 shadow-2xl">
+        {cover ? (
+          <img src={cover} alt="" className="h-full w-full object-cover" />
+        ) : (
+          <Music size={72} className="text-white/40" aria-hidden="true" />
+        )}
+      </div>
+      <div className="w-full min-w-0 text-center">
+        <h2 className="break-words text-xl font-semibold text-white" title={title}>{title}</h2>
+        {artist && <p className="mt-1 break-words text-base text-white/75">{artist}</p>}
+        {more.length > 0 && <p className="mt-1 break-words text-sm text-white/50">{more.join(" · ")}</p>}
+      </div>
+      <audio
+        src={url}
+        controls
+        autoPlay
+        className="w-full"
+        onError={() => setFailed(true)}
+        onLoadedMetadata={(e) => learn({ duration: seconds(e.currentTarget.duration) })}
+      />
+    </div>
+  );
+}
+
 /** What fills the stage for one file. Keyed by file, so each starts afresh. */
 function Stage({
   drive,
@@ -955,22 +1038,7 @@ function Stage({
     );
   }
   if (kind === "video") return <VideoPreview drive={drive} entry={entry} url={inlineUrl} subtitles={subtitles} learn={learn} />;
-  if (kind === "audio") {
-    if (failed) return <Unplayable what="audio file" />;
-    return (
-      <div className="flex w-full max-w-lg flex-col items-center gap-6 px-4">
-        <Music size={72} className="text-white/40" aria-hidden="true" />
-        <audio
-          src={inlineUrl}
-          controls
-          autoPlay
-          className="w-full"
-          onError={() => setFailed(true)}
-          onLoadedMetadata={(e) => learn({ duration: seconds(e.currentTarget.duration) })}
-        />
-      </div>
-    );
-  }
+  if (kind === "audio") return <AudioPreview drive={drive} entry={entry} url={inlineUrl} learn={learn} />;
   if (kind === "pdf") {
     if (file.failed) return <Unplayable what="PDF" />;
     if (pdfInMemory && !file.src) return <Loading loaded={file.loaded} total={entry.size} />;

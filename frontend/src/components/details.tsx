@@ -89,6 +89,16 @@ export function EntryDetails({ drive, entry, location }: { drive: string; entry:
             {entry.size >= 1024 && <span className="block text-xs text-muted">{bytes(entry.size)}</span>}
           </Row>
         )}
+        {info?.title && <Row label="Title">{info.title}</Row>}
+        {info?.artist && <Row label="Artist">{info.artist}</Row>}
+        {info?.album && <Row label="Album">{info.album}</Row>}
+        {info?.album_artist && info.album_artist !== info.artist && (
+          <Row label="Album artist">{info.album_artist}</Row>
+        )}
+        {info?.track && <Row label="Track">{info.track.replace("/", " of ")}</Row>}
+        {info?.disc && <Row label="Disc">{info.disc.replace("/", " of ")}</Row>}
+        {info?.year && <Row label="Year">{info.year}</Row>}
+        {info?.genre && <Row label="Genre">{info.genre}</Row>}
         {info?.width && info.height && (
           <Row label="Dimensions">
             {info.width} × {info.height}
@@ -103,7 +113,7 @@ export function EntryDetails({ drive, entry, location }: { drive: string; entry:
       </dl>
       {media && info && !shape && (
         <p className="mt-3 text-xs text-muted">
-          {kind === "audio" ? "Its length" : kind === "image" ? "Its dimensions" : "Its dimensions and length"} will
+          {kind === "audio" ? "Its length and song details" : kind === "image" ? "Its dimensions" : "Its dimensions and length"} will
           show here after it's opened once.
         </p>
       )}

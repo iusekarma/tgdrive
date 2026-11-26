@@ -375,6 +375,22 @@ class ApiTest(unittest.TestCase):
         folder = c.post("/api/drives/main/folders", json={"name": "F"}).json()["id"]
         self.assertEqual(c.get(f"/api/drives/main/files/{folder}/info").status_code, 400)
 
+    def test_song_info(self):
+        c = self.c
+        f = c.put("/api/drives/main/files", params={"filename": "s.mp3"}, content=b"\0" * 100).json()
+        url = f"/api/drives/main/files/{f['id']}/info"
+        song = {"title": "Song", "artist": "Band", "album": "Record", "album_artist": "Band",
+                "track": "3/12", "disc": "1", "year": 2019, "genre": "Rock"}
+        self.assertEqual(c.put(url, json=song).json(), song)
+        self.assertEqual(c.put(url, json={"duration": 200.5}).json(), {**song, "duration": 200.5})
+        other = c.put("/api/drives/main/files", params={"filename": "t.mp3"}, content=b"\0").json()["id"]
+        folder = c.post("/api/drives/main/folders", json={"name": "F"}).json()["id"]
+        r = c.post("/api/drives/main/files/info", json={"ids": [f["id"], other, folder, "gone"]})
+        self.assertEqual(r.json(), {f["id"]: {**song, "duration": 200.5}, other: {}})
+        self.assertEqual(c.post("/api/drives/main/files/info", json={"ids": []}).status_code, 422)
+        for bad in ({"title": "x" * 201}, {"track": "three"}, {"disc": "1/2/3"}, {"year": 0}, {"year": 10000}):
+            self.assertEqual(c.put(url, json=bad).status_code, 422, bad)
+
     def test_search(self):
         c = self.c
         folder = c.post("/api/drives/main/folders", json={"name": "Trips"}).json()["id"]

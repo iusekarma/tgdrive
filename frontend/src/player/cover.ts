@@ -1,7 +1,32 @@
-/** Cover art from inside an audio file: ID3 (MP3, WAV, AAC), FLAC pictures, Ogg comments, MP4 "covr". */
-import { ADTS, CustomSource, FLAC, Input, MP3, MP4, OGG, QTFF, WAVE, type AttachedImage } from "mediabunny";
+/** Cover art and song details from inside an audio file: ID3 (MP3, WAV, AAC),
+ * FLAC pictures and Vorbis comments, Ogg comments, MP4 "covr" and "ilst". */
+import { ADTS, CustomSource, FLAC, Input, MP3, MP4, OGG, QTFF, WAVE, type AttachedImage, type MetadataTags } from "mediabunny";
 
+import type { SongInfo } from "../api";
 import { BlobBytes, HttpBytes } from "./bytes";
+
+/** What the server keeps of a tag: trimmed, and short enough to be accepted. */
+const text = (value: string | undefined, max = 200) => value?.replace(/\0+$/, "").trim().slice(0, max) || undefined;
+
+/** 3 of 12 → "3/12"; 3 alone → "3". */
+const position = (n: number | undefined, total: number | undefined) =>
+  n && n > 0 && n <= 9999 ? (total && total >= n && total <= 9999 ? `${n}/${total}` : String(n)) : undefined;
+
+/** The song's details as the server stores them; only what the file has. */
+export function songInfo(tags: MetadataTags): SongInfo {
+  const year = tags.date && !Number.isNaN(tags.date.getTime()) ? tags.date.getUTCFullYear() : undefined;
+  const song: SongInfo = {
+    title: text(tags.title),
+    artist: text(tags.artist),
+    album: text(tags.album),
+    album_artist: text(tags.albumArtist),
+    track: position(tags.trackNumber, tags.tracksTotal),
+    disc: position(tags.discNumber, tags.discsTotal),
+    year: year && year >= 1 && year <= 9999 ? year : undefined,
+    genre: text(tags.genre),
+  };
+  return Object.fromEntries(Object.entries(song).filter(([, v]) => v !== undefined)) as SongInfo;
+}
 
 /** Tags often name the wrong type, or none a browser knows ("JPG"); the first bytes don't lie. */
 function imageType({ data, mimeType }: AttachedImage): string {
@@ -13,10 +38,12 @@ function imageType({ data, mimeType }: AttachedImage): string {
   return mimeType;
 }
 
-/** The pictures in the file, front cover first; none if it has none or isn't
- * readable audio. Throws if the file couldn't be fetched, or on `signal`.
- * Only the part holding the tags is read, usually the start. */
-export async function coverArt(source: Blob | string, size: number, signal?: AbortSignal): Promise<Blob[]> {
+export type SongTags = { images: Blob[]; song: SongInfo };
+
+/** The pictures in the file, front cover first, and its song details; none if
+ * it has none or isn't readable audio. Throws if the file couldn't be fetched,
+ * or on `signal`. Only the part holding the tags is read, usually the start. */
+export async function songTags(source: Blob | string, size: number, signal?: AbortSignal): Promise<SongTags> {
   signal?.throwIfAborted();
   const bytes = typeof source === "string" ? new HttpBytes(source, size) : new BlobBytes(source);
   const stop = () => bytes.close();
@@ -35,16 +62,21 @@ export async function coverArt(source: Blob | string, size: number, signal?: Abo
     }),
   });
   try {
-    const { images = [] } = await input.getMetadataTags().catch(() => ({ images: [] }));
+    const tags: MetadataTags = await input.getMetadataTags().catch(() => ({}));
     signal?.throwIfAborted();
     if (failure) throw failure;
     const front = (i: AttachedImage) => (i.kind === "coverFront" ? 0 : 1);
-    return [...images]
+    const images = [...(tags.images ?? [])]
       .sort((a, b) => front(a) - front(b))
       .map((i) => new Blob([i.data as Uint8Array<ArrayBuffer>], { type: imageType(i) }));
+    return { images, song: songInfo(tags) };
   } finally {
     signal?.removeEventListener("abort", stop);
     input.dispose();
     bytes.close();
   }
 }
+
+/** Just the pictures, front cover first. */
+export const coverArt = async (source: Blob | string, size: number, signal?: AbortSignal): Promise<Blob[]> =>
+  (await songTags(source, size, signal)).images;

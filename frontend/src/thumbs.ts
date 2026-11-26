@@ -191,11 +191,7 @@ async function fromPdf(source: Blob | string, size: number, signal?: AbortSignal
 async function fromCover(source: Blob | string, size: number, signal?: AbortSignal): Promise<Blob | null> {
   // Mediabunny is large, and only needed here and by the player.
   const { coverArt } = await import("./player/cover");
-  for (const picture of await coverArt(source, size, signal)) {
-    const image = await fromImage(picture).then((look) => look.image, () => null);
-    if (image) return image;
-  }
-  return null;
+  return firstDrawable(await coverArt(source, size, signal));
 }
 
 /** Draws the frame the video element is showing. */
@@ -271,13 +267,54 @@ const audioInfo = (file: Blob) =>
     };
   });
 
-/** Audio from a local copy: its length, and its cover art if it has any. */
+/** The first of the pictures that can be drawn, as a thumbnail. */
+async function firstDrawable(pictures: Blob[]): Promise<Blob | null> {
+  for (const picture of pictures) {
+    const image = await fromImage(picture).then((look) => look.image, () => null);
+    if (image) return image;
+  }
+  return null;
+}
+
+/** Audio from a local copy: its length, its song details, and its cover art if it has any. */
 async function fromAudio(file: Blob): Promise<Look & { coverless: boolean }> {
-  const [{ info }, cover] = await Promise.all([
+  const { songTags } = await import("./player/cover");
+  const [{ info }, tags] = await Promise.all([
     audioInfo(file),
-    fromCover(file, file.size).catch(() => undefined),
+    songTags(file, file.size).catch(() => undefined),
   ]);
-  return { image: cover ?? null, info, coverless: cover === null };
+  const cover = tags ? await firstDrawable(tags.images) : undefined;
+  return { image: cover ?? null, info: { ...tags?.song, ...info }, coverless: cover === null };
+}
+
+/** Songs looked at in this tab and found to have no tags, so they aren't read again. */
+const tagless = new Set<string>();
+
+/** Whether the file's details include any of a song's own tags. */
+export const hasSongInfo = (info: FileInfo | undefined) =>
+  !!info && ["title", "artist", "album", "album_artist", "track", "disc", "year", "genre"].some((k) => k in info);
+
+/** Whether the song was looked at and has no tags. */
+export const hasNoTags = (drive: string, id: string) => tagless.has(key(drive, id));
+
+/** Reads a song's tags from the server's copy (only the part that holds them)
+ * and saves them. Resolves to the details as the server now has them, or null
+ * if it has none (hasNoTags() then says so) or they couldn't be read. */
+export function readSongDetails(drive: string, entry: Entry, signal: AbortSignal): Promise<FileInfo | null> {
+  return slot("make", async () => {
+    if (signal.aborted) return null;
+    try {
+      const { songTags } = await import("./player/cover");
+      const { song } = await songTags(api.fileUrl(drive, entry.id), entry.size, signal);
+      if (Object.keys(song).length === 0) {
+        tagless.add(key(drive, entry.id));
+        return null;
+      }
+      return await api.putFileInfo(drive, entry.id, song);
+    } catch {
+      return null;   // not readable here, or stopped
+    }
+  });
 }
 
 /** Whether the file was looked at and has nothing to make a thumbnail from. */
@@ -372,7 +409,11 @@ export function sendVideoFrame(drive: string, id: string): Promise<boolean> {
  * does: images up to 50 MB on the server, which fetches the file itself, so
  * the browser downloads nothing; anything else here. Resolves to
  * whether there is one now. */
-export async function regenerateThumbnail(drive: string, entry: Entry): Promise<boolean> {
+export async function regenerateThumbnail(
+  drive: string,
+  entry: Entry,
+  onInfo?: (info: FileInfo, id: string) => void,
+): Promise<boolean> {
   const k = key(drive, entry.id);
   try {
     await api.deleteThumbnail(drive, entry.id);
@@ -381,7 +422,7 @@ export async function regenerateThumbnail(drive: string, entry: Entry): Promise<
   }
   forget(k);
   try {
-    return await makeThumbnail(drive, { ...entry, thumb: false }, new AbortController().signal);
+    return await makeThumbnail(drive, { ...entry, thumb: false }, new AbortController().signal, onInfo);
   } finally {
     changed(k);   // whatever shows it loads the new one, or the icon
   }
@@ -392,8 +433,14 @@ export async function regenerateThumbnail(drive: string, entry: Entry): Promise<
  * PDFs and audio are drawn here from the server's copy (a video only as far as
  * the frame, a comic or PDF only its index and first page, audio only its tags).
  * Resolves to whether there is one now; if not, hasNoCover() says whether that
- * is because the file has none. Stops early when `signal` aborts. */
-export async function makeThumbnail(drive: string, entry: Entry, signal: AbortSignal): Promise<boolean> {
+ * is because the file has none. Stops early when `signal` aborts. A song's
+ * tags are saved on the way, and `onInfo` gets the details as the server now has them. */
+export async function makeThumbnail(
+  drive: string,
+  entry: Entry,
+  signal: AbortSignal,
+  onInfo?: (info: FileInfo, id: string) => void,
+): Promise<boolean> {
   const kind = previewKind(entry.name, entry.size);
   if (kind === "image" && entry.size <= SERVER_SOURCE_MAX) {
     return (await loadThumbnail(drive, entry.id, "make")) !== null;
@@ -416,7 +463,14 @@ export async function makeThumbnail(drive: string, entry: Entry, signal: AbortSi
         // The same for its index, and what the first page is made of.
         image = await fromPdf(url, entry.size, signal, api.fileUrlAhead(drive, entry.id, entry.size - 1));
       } else if (kind === "audio") {
-        image = await fromCover(url, entry.size, signal);
+        // The tags are read for the cover anyway, so the song's details are kept too.
+        const { songTags } = await import("./player/cover");
+        const tags = await songTags(url, entry.size, signal);
+        if (Object.keys(tags.song).length > 0) {
+          const info = await api.putFileInfo(drive, entry.id, tags.song).catch(() => null);
+          if (info) onInfo?.(info, entry.id);
+        } else tagless.add(key(drive, entry.id));
+        image = await firstDrawable(tags.images);
         if (!image) coverless.add(key(drive, entry.id));
       }
     } catch {

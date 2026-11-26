@@ -171,6 +171,19 @@ class FileInfo(BaseModel):
     modified: int | None = Field(None, ge=0, le=100_000_000_000)
     taken: str | None = Field(None, pattern=r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
     camera: str | None = Field(None, max_length=200)
+    # A song's own tags. `track` and `disc` are "3" or "3/12".
+    title: str | None = Field(None, max_length=200)
+    artist: str | None = Field(None, max_length=200)
+    album: str | None = Field(None, max_length=200)
+    album_artist: str | None = Field(None, max_length=200)
+    track: str | None = Field(None, pattern=r"^\d{1,4}(/\d{1,4})?$")
+    disc: str | None = Field(None, pattern=r"^\d{1,4}(/\d{1,4})?$")
+    year: int | None = Field(None, ge=1, le=9999)
+    genre: str | None = Field(None, max_length=200)
+
+
+class NodeList(BaseModel):
+    ids: NodeIds
 
 
 class NodesMove(BaseModel):
@@ -829,6 +842,13 @@ async def get_thumbnail(node_id: str, drive: Drive = Depends(unlocked_drive), st
         "X-Content-Type-Options": "nosniff",
         "Cache-Control": "private, no-store",
     })
+
+
+@router.post("/drives/{name}/files/info")
+async def get_files_info(body: NodeList, drive: Drive = Depends(unlocked_drive), store: Storage = Depends(get_store)):
+    """The details of many files at once, by id; folders and ids not found are
+    left out. Never fetches the files themselves."""
+    return store.infos(drive, body.ids)
 
 
 @router.get("/drives/{name}/files/{node_id}/info")

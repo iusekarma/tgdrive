@@ -32,7 +32,11 @@ export function useLearn(drive: string, id: string) {
     if (Object.keys(fresh).length === 0 || sent.has(signature)) return;
     sent.add(signature);
     void api.putFileInfo(drive, id, fresh).then(
-      (info) => queryClient.setQueryData(infoKey(drive, id), info),
+      (info) => {
+        queryClient.setQueryData(infoKey(drive, id), info);
+        // The folder's count of songs without details.
+        void queryClient.invalidateQueries({ queryKey: ["songInfo", drive] });
+      },
       () => undefined,
     );
   };

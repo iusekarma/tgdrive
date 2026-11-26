@@ -20,6 +20,17 @@ export type FileInfo = {
   modified?: number;
   taken?: string;
   camera?: string;
+} & SongInfo;
+/** A song's own tags. `track` and `disc` are "3" or "3/12". */
+export type SongInfo = {
+  title?: string;
+  artist?: string;
+  album?: string;
+  album_artist?: string;
+  track?: string;
+  disc?: string;
+  year?: number;
+  genre?: string;
 };
 export type Crumb = { id: string; name: string };
 export type Listing = { path: Crumb[]; entries: Entry[] };
@@ -249,6 +260,9 @@ export const api = {
   /** A HEIC image converted to JPEG for viewing (see `isConvertedImage`). */
   previewUrl: (drive: string, id: string) => `/api${drivePath(drive)}/files/${id}/preview`,
   fileInfo: (drive: string, id: string) => request<FileInfo>("GET", `${drivePath(drive)}/files/${id}/info`),
+  /** The details of many files at once; folders and ids not found are left out. */
+  filesInfo: (drive: string, ids: string[]) =>
+    request<Record<string, FileInfo>>("POST", `${drivePath(drive)}/files/info`, { ids }),
   /** Merges what is sent into what is known and returns it all. */
   putFileInfo: (drive: string, id: string, info: FileInfo) =>
     request<FileInfo>("PUT", `${drivePath(drive)}/files/${id}/info`, info),

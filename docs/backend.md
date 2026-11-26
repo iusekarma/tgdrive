@@ -284,7 +284,8 @@ on failure.
 
 | Method | Does |
 |---|---|
-| `info(drive, id)` | The file's details (`width`, `height`, `duration`, `modified`, `taken`, `camera`; any may be missing), decrypted from `nodes.info_enc` |
+| `info(drive, id)` | The file's details (`width`, `height`, `duration`, `modified`, `taken`, `camera`, and a song's `title`, `artist`, `album`, `album_artist`, `track`, `disc`, `year`, `genre`; any may be missing), decrypted from `nodes.info_enc` |
+| `infos(drive, ids)` | `info()` for many files, `{id: details}`, leaving out folders, unfinished uploads and unknown ids (`POST /files/info`) |
 | `set_info(drive, id, fields)` | Merges `fields` in, seals the JSON with the file key (AAD `tgdrive/info\|<id>`) and saves it |
 
 Details are never worth fetching a file from Telegram for. Browsers send

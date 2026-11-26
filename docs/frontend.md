@@ -284,7 +284,9 @@ video, comic, PDF and audio file there without one, `MAKE_PARALLEL` (3) at a tim
 (up to 50 MB) are left to it, so the browser doesn't download them; larger
 ones, videos, comics, PDFs and audio are drawn from the server's copy, a video read only as far as its
 frame (`preload="metadata"`), a comic or PDF only its index and first page (which the server fetches together:
-`api.fileUrlAhead`), audio only its tags. Audio found to have no cover art is
+`api.fileUrlAhead`), audio only its tags, whose song details (title, artist, album...) are
+saved at the same time. **Read details of N songs** does the same for a folder's songs that
+have none saved (`readSongDetails()`), found with one `POST /files/info`. Audio found to have no cover art is
 remembered for as long as the tab is open (`hasNoCover()`) and not looked at again. An `AbortController` stops it when the folder,
 drive or search changes; closing the tab stops it anyway. Files whose
 thumbnail is cached on the server count as having one, and the server sends
@@ -297,7 +299,7 @@ and a video's, comic's, PDF's or audio file's carries a small badge (`KindBadge`
 mistaken for a picture.
 
 The same decode yields the file's details (dimensions, length, EXIF date
-and camera, last-modified time), sent with one `PUT /files/{id}/info`.
+and camera, a song's tags, last-modified time), sent with one `PUT /files/{id}/info`.
 
 ## pdf/
 
@@ -329,6 +331,9 @@ an image thumbnail. Nothing downloads a file just to describe it.
 media element found (`naturalWidth`, `videoWidth`, `duration`); it sends
 only fields that differ from what is cached. `readExif(file)` parses the
 date taken and camera from the first 256 KB of a local JPEG.
+`songInfo(tags)` (`player/cover.ts`) turns mediabunny's tags into the
+`title`, `artist`, `album`, `album_artist`, `track` and `disc` ("3" or
+"3/12"), `year` and `genre` the server keeps.
 
 ## format.ts
 
@@ -514,7 +519,11 @@ of the listing (or search results) it was opened from.
   fade like the rest (the `mouse:` variant in `index.css`).
 - **What it shows**: images, video, audio and PDF (iframe) through
   `?inline=true`, which the server honours only for safe types. Video has
-  its own player ([below](#componentsplayertsx-and-player)). Text fetches
+  its own player ([below](#componentsplayertsx-and-player)). Audio shows the
+  song's cover, title, artist, album, year, track and genre above the browser's
+  controls: `songTags()` in `player/cover.ts` reads them from the file (only
+  the part that holds them) while it starts playing, and saves them with
+  `useLearn` so the details panel shows them too. Text fetches
   the first 512 KB with a `Range` request. Files the browser can't decode say so and offer the
   download.
 - **Zips** (`zip`, `jar`, `apk`): `listZip()` in `zip.ts` reads the
