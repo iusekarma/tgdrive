@@ -221,6 +221,11 @@ sending, 20 s while the server is storing (it moves 16 MiB at a time).
 When the server reports a `wait`, the row says why ("Telegram asked to slow
 down. Trying again in 12 s.").
 
+**Time taken.** The header counts only the time something was going
+(`clock`: it stops whenever nothing is queued or uploading, and picks up
+again when more files are added), showing "4 min so far" and, once done,
+"took 6 min". The overall average speed is worked out from the same time.
+
 **After an upload**, `sendDetails()` makes a thumbnail and reads the
 file's details from the local copy in the background while the next file
 starts.
@@ -425,7 +430,9 @@ lazily (`["nodes", drive, id]`, only when expanded), sharing the cache with
 the main listing. Nothing opens on its own: only the arrows expand folders,
 and the locate button beside "Drives" (shown inside a folder) opens the tree down
 to the folder being viewed and scrolls it into view.
-Clicking a locked drive goes to the drives page to unlock it.
+Clicking a locked drive goes to the drives page to unlock it. An unlocked
+drive with its own password has a lock button on its row (on hover with a
+mouse), which leaves the drive first if it is being viewed.
 
 ## components/driveDialogs.tsx
 
@@ -494,7 +501,9 @@ of the listing (or search results) it was opened from.
 - **Stepping**: ← / → buttons and keys, and a horizontal swipe on touch
   screens for images, audio, comics and zips. Keys are left alone while a
   media element has focus, so its own seeking keys still work. The video
-  player takes the arrows too; Shift+← / → steps past it.
+  player takes the arrows too; Shift+← / → steps past it. `[` / `]` always
+  go to the previous or next file, whatever is open: past a video's seeking
+  and a comic's remaining pages, even with a video focused.
 - **Full size**: what is shown takes all of the window but the header, scaled
   up if it is smaller.
 - **Controls fade** (`useIdle`): a reader's page bar and the player's controls

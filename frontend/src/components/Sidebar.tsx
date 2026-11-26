@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ChevronRight,
   Folder,
@@ -17,6 +17,7 @@ import { Link, useMatch, useNavigate } from "react-router-dom";
 
 import { api, type DriveInfo } from "../api";
 import { driveUrl } from "../format";
+import { forgetThumbnails } from "../thumbs";
 import { useTheme } from "../theme";
 import { Mark } from "./LockDial";
 import { Menu, MenuDivider, MenuHeading, MenuItem } from "./menu";
@@ -187,6 +188,7 @@ function DriveRow({
   onToggle: (k: string) => void;
 }) {
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const k = key(drive.name, null);
   const open = drive.unlocked && expanded.has(k);
   const here = current.drive === drive.name && current.folder === null;
@@ -198,9 +200,19 @@ function DriveRow({
     </>
   );
   const style = `${ROW} pl-1.5 ${state(here)}`;
+
+  async function lock() {
+    // Off the drive first, so its page doesn't ask for what was just locked.
+    if (current.drive === drive.name) navigate("/");
+    await api.lock(drive.name).catch(() => undefined);
+    queryClient.removeQueries({ queryKey: ["nodes", drive.name] });
+    forgetThumbnails(drive.name);
+    await queryClient.invalidateQueries({ queryKey: ["drives"] });
+  }
+
   return (
     <li>
-      <div ref={ref} className="flex items-center">
+      <div ref={ref} className="group/drive relative flex items-center">
         {drive.unlocked ? (
           <>
             <Toggle expanded={open} empty={false} label={drive.name} onToggle={() => onToggle(k)} />
@@ -208,10 +220,21 @@ function DriveRow({
               to={driveUrl(drive.name)}
               aria-current={here ? "page" : undefined}
               title={drive.name}
-              className={style}
+              className={`${style} ${drive.protected ? "pr-8" : ""}`}
             >
               {label}
             </Link>
+            {drive.protected && (
+              <button
+                type="button"
+                onClick={() => void lock()}
+                aria-label={`Lock ${drive.name}`}
+                title={`Lock ${drive.name}`}
+                className="absolute right-1 inline-flex h-6 w-6 items-center justify-center rounded-md text-muted hover:bg-ink/9 hover:text-ink mouse:opacity-0 mouse:focus-visible:opacity-100 mouse:group-hover/drive:opacity-100"
+              >
+                <Lock size={13} aria-hidden="true" />
+              </button>
+            )}
           </>
         ) : (
           <>

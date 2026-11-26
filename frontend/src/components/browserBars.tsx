@@ -413,6 +413,7 @@ const SHORTCUTS: [string[], string][] = [
   [["Delete"], "Delete"],
   [["/"], "Search"],
   [["A–Z"], "Jump to a name"],
+  [["[", "]"], "Previous or next file, in the viewer"],
   [["?"], "Show these shortcuts"],
 ];
 

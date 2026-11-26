@@ -1042,15 +1042,24 @@ export function Viewer({
     .filter((e) => e.kind === "file" && sidecarTag(entry.name, e.name) !== null && locationOf(e) === place)
     .map((e) => ({ id: e.id, name: e.name, url: api.fileUrl(drive, e.id) }));
 
-  function step(dir: -1 | 1) {
-    if (pager.current?.(dir)) return;
+  /** `skipPages`: straight to the next file, past a comic's remaining pages. */
+  function step(dir: -1 | 1, skipPages = false) {
+    if (!skipPages && pager.current?.(dir)) return;
     const to = dir < 0 ? prev : next;
     if (to) setEntry(to);
   }
 
   function onKeyDown(e: KeyboardEvent) {
     if (e.key === "Tab") wake();
-    if (typing(e.target) || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    const field = e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement;
+    // [ and ] always move between files, even from a focused video: arrows seek a video and turn a comic's pages.
+    if (!field && (e.key === "[" || e.key === "]")) {
+      step(e.key === "[" ? -1 : 1, true);
+      e.preventDefault();
+      return;
+    }
+    if (typing(e.target)) return;
     if (e.key === "ArrowLeft") step(-1);
     else if (e.key === "ArrowRight") step(1);
     else if (e.key === "i") setShowInfo(!showInfo);
@@ -1136,7 +1145,7 @@ export function Viewer({
               data-control
               onClick={() => setEntry(prev)}
               aria-label={`Previous: ${prev.name}`}
-              title={`Previous (${kind === "video" ? "Shift+" : ""}←)`}
+              title="Previous file ([)"
               className={`${arrow} left-4 justify-start`}
             >
               <span className={disc}>
@@ -1150,7 +1159,7 @@ export function Viewer({
               data-control
               onClick={() => setEntry(next)}
               aria-label={`Next: ${next.name}`}
-              title={`Next (${kind === "video" ? "Shift+" : ""}→)`}
+              title="Next file (])"
               className={`${arrow} right-4 justify-end`}
             >
               <span className={disc}>

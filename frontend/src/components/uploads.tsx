@@ -1062,6 +1062,8 @@ function Summary({
   const ms = clock.spent + (clock.since === null ? 0 : now - clock.since);
   const speed = ms >= 1000 && moved > 0 ? (moved * 1000) / ms : null;
   const left = speed && busy ? formatDuration((total - stored) / speed) + " left" : null;
+  // Only while something was going: time with nothing to upload, before more files were added, isn't counted.
+  const took = ms >= 1000 ? (busy ? `${formatDuration(ms / 1000)} so far` : `took ${formatDuration(ms / 1000)}`) : null;
   const waiting = items.filter((item) => item.status === "interrupted").length;
   // With the list folded away, these are the rows that would otherwise go unnoticed.
   const failed = items.filter((item) => item.status === "error").length;
@@ -1136,6 +1138,7 @@ function Summary({
             {[
               `${formatSize(stored)} of ${formatSize(total)}`,
               speed && `${formatSize(speed)}/s${busy ? "" : " on average"}`,
+              took,
               left,
               ...attention,
             ]
