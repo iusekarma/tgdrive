@@ -503,6 +503,19 @@ class Storage:
             out += self.walk(drive, child.id, path + "/")
         return out
 
+    def files_under(self, drive: Drive, parent_id: str | None = None) -> list[Entry]:
+        """Every file in the folder (or the whole drive) and all its subfolders,
+        folder by folder."""
+        out: list[Entry] = []
+        todo = [parent_id]
+        while todo:
+            for entry in self.list(drive, todo.pop(0)):
+                if entry.kind == "dir":
+                    todo.append(entry.id)
+                else:
+                    out.append(entry)
+        return out
+
     def search(self, drive: Drive, query: str, limit: int = 200,
                parent_id: str | None = None) -> tuple[list[tuple[Entry, list[tuple[str, str]]]], int]:
         """Case-insensitive; every word must appear in the name. Looks through

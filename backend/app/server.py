@@ -505,6 +505,14 @@ async def list_nodes(parent: str | None = None, drive: Drive = Depends(unlocked_
     }
 
 
+@router.get("/drives/{name}/tree")
+async def list_tree(parent: str | None = None, drive: Drive = Depends(unlocked_drive),
+                    store: Storage = Depends(get_store)):
+    """Every file under the folder `parent` (or the whole drive), in its
+    subfolders too. Folders themselves are left out."""
+    return {"entries": [asdict(e) for e in store.files_under(drive, parent)]}
+
+
 @router.get("/drives/{name}/search")
 async def search(q: Annotated[str, Query(max_length=200)], parent: str | None = None,
                  limit: Annotated[int, Query(ge=1, le=1000)] = 200, drive: Drive = Depends(unlocked_drive), store: Storage = Depends(get_store)):

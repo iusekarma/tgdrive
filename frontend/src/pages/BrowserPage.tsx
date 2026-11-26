@@ -10,6 +10,7 @@ import {
   KeyRound,
   Lock,
   LockOpen,
+  MoreHorizontal,
   Music,
   Network,
   PanelRight,
@@ -213,7 +214,7 @@ export default function BrowserPage() {
   }, [drive, queryClient]);
 
   // Making a folder's thumbnails, or reading its songs' tags, a few files at a time. Leaving the folder stops it.
-  const [making, setMaking] = useState<{ what: string; done: number; total: number } | null>(null);
+  const [making, setMaking] = useState<{ what: string; songs: boolean; done: number; total: number } | null>(null);
   const makingRun = useRef<AbortController | null>(null);
 
   useEffect(() => {
@@ -552,73 +553,114 @@ export default function BrowserPage() {
     queryClient.setQueryData<Record<string, FileInfo>>(songsKey, (old) => old && { ...old, [id]: info });
   };
 
-  /** Reads the tags of the songs here that have none saved, a few at a time,
-   * each only as far as its tags. */
-  async function readSongs() {
-    const todo = unreadSongs;
-    if (makingRun.current || todo.length === 0) return;
+  type Outcome = "done" | "bare" | "failed";
+  type Job = {
+    what: string;
+    /** Works on one file; "bare" when it has nothing to give (no cover art, no tags). */
+    step: (entry: Entry, signal: AbortSignal) => Promise<Outcome>;
+    notes: (failed: number, bare: number, total: number) => string[];
+  };
+
+  const THUMBNAILS: Job = {
+    what: "Making thumbnails",
+    step: async (entry, signal) => {
+      if (await makeThumbnail(drive, entry, signal, learned)) {
+        refreshSoon(queryClient, drive);
+        return "done";
+      }
+      return hasNoCover(drive, entry.id) ? "bare" : "failed";
+    },
+    notes: (failed, bare, total) => [
+      failed ? `${failed} of ${total} files couldn't get a thumbnail.` : "",
+      bare ? `${bare} audio ${bare === 1 ? "file has" : "files have"} no cover art.` : "",
+    ],
+  };
+
+  const SONGS: Job = {
+    what: "Reading song details",
+    step: async (entry, signal) => {
+      const info = await readSongDetails(drive, entry, signal);
+      if (info) learned(info, entry.id);
+      return info ? "done" : hasNoTags(drive, entry.id) ? "bare" : "failed";
+    },
+    notes: (failed, bare, total) => [
+      failed ? `${failed} of ${total} songs couldn't be read.` : "",
+      bare ? `${bare} ${bare === 1 ? "song has" : "songs have"} no details in them.` : "",
+    ],
+  };
+
+  /** Starts a run, unless one is going. Leaving the folder or Stop aborts it. */
+  function startRun(job: Job, what = job.what): AbortController | null {
+    if (makingRun.current) return null;
     const run = new AbortController();
     makingRun.current = run;
     setNotice(null);
-    setMaking({ what: "Reading song details", done: 0, total: todo.length });
-    let done = 0;
-    let failed = 0;
-    let bare = 0;
-    const rest = todo.values();
-    async function work() {
-      for (const entry of rest) {
-        if (run.signal.aborted) return;
-        const info = await readSongDetails(drive, entry, run.signal);
-        if (run.signal.aborted) return;
-        if (info) learned(info, entry.id);
-        else if (hasNoTags(drive, entry.id)) bare += 1;
-        else failed += 1;
-        done += 1;
-        setMaking({ what: "Reading song details", done, total: todo.length });
-      }
-    }
-    await Promise.all(Array.from({ length: MAKE_PARALLEL }, work));
+    setMaking({ what, songs: job === SONGS, done: 0, total: 0 });
+    return run;
+  }
+
+  function endRun(run: AbortController, note?: string) {
     if (run.signal.aborted) return;
     makingRun.current = null;
     setMaking(null);
-    const notes = [];
-    if (failed) notes.push(`${failed} of ${todo.length} songs couldn't be read.`);
-    if (bare) notes.push(`${bare} ${bare === 1 ? "song has" : "songs have"} no details in them.`);
-    if (notes.length) setNotice(notes.join(" "));
+    if (note) setNotice(note);
   }
 
   /** A few files at a time, so Telegram and the browser's connections stay free for browsing. */
-  async function makeThumbnails() {
-    const todo = missingThumbnails;
-    if (makingRun.current || todo.length === 0) return;
-    const run = new AbortController();
-    makingRun.current = run;
-    setNotice(null);
-    setMaking({ what: "Making thumbnails", done: 0, total: todo.length });
-    let done = 0;
-    let failed = 0;
-    let bare = 0;
+  async function work(job: Job, todo: Entry[], run: AbortController) {
+    const total = todo.length;
+    const count = { done: 0, bare: 0, failed: 0 };
+    let finished = 0;
+    setMaking({ what: job.what, songs: job === SONGS, done: 0, total });
     const rest = todo.values();   // shared: each worker takes the next file
-    async function work() {
+    async function worker() {
       for (const entry of rest) {
         if (run.signal.aborted) return;
-        const made = await makeThumbnail(drive, entry, run.signal, learned);
+        const outcome = await job.step(entry, run.signal);
         if (run.signal.aborted) return;
-        if (made) refreshSoon(queryClient, drive);
-        else if (hasNoCover(drive, entry.id)) bare += 1;
-        else failed += 1;
-        done += 1;
-        setMaking({ what: "Making thumbnails", done, total: todo.length });
+        count[outcome] += 1;
+        finished += 1;
+        setMaking({ what: job.what, songs: job === SONGS, done: finished, total });
       }
     }
-    await Promise.all(Array.from({ length: MAKE_PARALLEL }, work));
-    if (run.signal.aborted) return;
-    makingRun.current = null;
-    setMaking(null);
-    const notes = [];
-    if (failed) notes.push(`${failed} of ${todo.length} files couldn't get a thumbnail.`);
-    if (bare) notes.push(`${bare} audio ${bare === 1 ? "file has" : "files have"} no cover art.`);
-    if (notes.length) setNotice(notes.join(" "));
+    await Promise.all(Array.from({ length: MAKE_PARALLEL }, worker));
+    endRun(run, job.notes(count.failed, count.bare, total).filter(Boolean).join(" ") || undefined);
+  }
+
+  function runHere(job: Job, todo: Entry[]) {
+    if (todo.length === 0) return;
+    const run = startRun(job);
+    if (run) void work(job, todo, run);
+  }
+
+  /** The same for every file under this folder, subfolders included. */
+  async function runDeep(job: Job) {
+    const run = startRun(job, "Looking through subfolders…");
+    if (!run) return;
+    let todo: Entry[];
+    try {
+      const { entries: files } = await api.tree(drive, parent);
+      if (run.signal.aborted) return;
+      if (job === THUMBNAILS) {
+        todo = files.filter((e) => canThumbnail(e) && !e.thumb && !hasNoCover(drive, e.id));
+      } else {
+        const songs = files.filter((e) => previewKind(e.name, e.size) === "audio" && !hasNoTags(drive, e.id));
+        const known: Record<string, FileInfo> = {};
+        for (let i = 0; i < songs.length; i += 5000) {
+          Object.assign(known, await api.filesInfo(drive, songs.slice(i, i + 5000).map((e) => e.id)));
+          if (run.signal.aborted) return;
+        }
+        todo = songs.filter((e) => e.id in known && !hasSongInfo(known[e.id]));
+      }
+    } catch {
+      return endRun(run, "The subfolders couldn't be looked through.");
+    }
+    if (todo.length === 0) {
+      return endRun(run, job === THUMBNAILS
+        ? "Everything here and in the subfolders already has a thumbnail."
+        : "Every song here and in the subfolders already has its details.");
+    }
+    await work(job, todo, run);
   }
 
   function stopMakingThumbnails() {
@@ -891,7 +933,7 @@ export default function BrowserPage() {
                 {!making && missingThumbnails.length > 0 && (
                   <button
                     type="button"
-                    onClick={() => void makeThumbnails()}
+                    onClick={() => runHere(THUMBNAILS, missingThumbnails)}
                     title={`${missingThumbnails.length} images, videos, comics, PDFs and audio files here have no thumbnail`}
                     className="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-lg bg-ink/6 px-2.5 text-[13px] text-ink transition-colors hover:bg-ink/10"
                   >
@@ -903,13 +945,29 @@ export default function BrowserPage() {
                 {!making && unreadSongs.length > 0 && (
                   <button
                     type="button"
-                    onClick={() => void readSongs()}
+                    onClick={() => runHere(SONGS, unreadSongs)}
                     title={`Read the title, artist and album of ${unreadSongs.length} ${unreadSongs.length === 1 ? "song" : "songs"} here that don't have them yet`}
                     className="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-lg bg-ink/6 px-2.5 text-[13px] text-ink transition-colors hover:bg-ink/10"
                   >
                     <Music size={14} aria-hidden="true" />
                     Read details of {unreadSongs.length.toLocaleString()} {unreadSongs.length === 1 ? "song" : "songs"}
                   </button>
+                )}
+                {!searching && !making && (
+                  <Menu label="More for this folder" trigger={<MoreHorizontal size={16} />} buttonClass={`${ICON_BUTTON} !h-7 !w-7`} width="w-72">
+                    {(close) => (
+                      <>
+                        <MenuItem onSelect={() => (close(), void runDeep(THUMBNAILS))}>
+                          <Images size={16} />
+                          Make thumbnails, subfolders too
+                        </MenuItem>
+                        <MenuItem onSelect={() => (close(), void runDeep(SONGS))}>
+                          <Music size={16} />
+                          Read song details, subfolders too
+                        </MenuItem>
+                      </>
+                    )}
+                  </Menu>
                 )}
               </div>
             </>
@@ -1023,23 +1081,25 @@ export default function BrowserPage() {
           )}
           {making && (
             <Toast>
-              {making.what === "Making thumbnails" ? (
+              {!making.songs ? (
                 <Images size={16} className="shrink-0 text-muted" aria-hidden="true" />
               ) : (
                 <Music size={16} className="shrink-0 text-muted" aria-hidden="true" />
               )}
               <span className="min-w-0 truncate tabular-nums">
-                {making.what}, {making.done} of {making.total}
+                {making.total ? `${making.what}, ${making.done} of ${making.total}` : making.what}
               </span>
-              <span
-                className="hidden h-1 w-28 shrink-0 overflow-hidden rounded-full bg-ink/10 @lg:block"
-                aria-hidden="true"
-              >
+              {making.total > 0 && (
                 <span
-                  className="block h-full rounded-full bg-accent transition-[width]"
-                  style={{ width: `${(making.done / making.total) * 100}%` }}
-                />
-              </span>
+                  className="hidden h-1 w-28 shrink-0 overflow-hidden rounded-full bg-ink/10 @lg:block"
+                  aria-hidden="true"
+                >
+                  <span
+                    className="block h-full rounded-full bg-accent transition-[width]"
+                    style={{ width: `${(making.done / making.total) * 100}%` }}
+                  />
+                </span>
+              )}
               <Button size="sm" onClick={stopMakingThumbnails}>
                 Stop
               </Button>

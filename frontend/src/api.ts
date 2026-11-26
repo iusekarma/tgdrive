@@ -201,6 +201,9 @@ export const api = {
 
   list: (drive: string, parent: string | null) =>
     request<Listing>("GET", `${drivePath(drive)}/nodes${parent ? `?parent=${encodeURIComponent(parent)}` : ""}`),
+  /** Every file under the folder `parent` (or the whole drive), subfolders included; no folders. */
+  tree: (drive: string, parent: string | null) =>
+    request<{ entries: Entry[] }>("GET", `${drivePath(drive)}/tree${parent ? `?parent=${encodeURIComponent(parent)}` : ""}`),
   /** Everything under the folder `parent`, or the whole drive. */
   search: (drive: string, q: string, parent: string | null) =>
     request<SearchResults>(

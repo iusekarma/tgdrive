@@ -391,6 +391,19 @@ class ApiTest(unittest.TestCase):
         for bad in ({"title": "x" * 201}, {"track": "three"}, {"disc": "1/2/3"}, {"year": 0}, {"year": 10000}):
             self.assertEqual(c.put(url, json=bad).status_code, 422, bad)
 
+    def test_tree(self):
+        c = self.c
+        top = c.post("/api/drives/main/folders", json={"name": "Music"}).json()["id"]
+        sub = c.post("/api/drives/main/folders", json={"name": "Album", "parent_id": top}).json()["id"]
+        c.post("/api/drives/main/folders", json={"name": "Empty", "parent_id": sub})
+        a = c.put("/api/drives/main/files", params={"filename": "a.mp3", "parent": top}, content=b"a").json()["id"]
+        b = c.put("/api/drives/main/files", params={"filename": "b.mp3", "parent": sub}, content=b"b").json()["id"]
+        out = c.put("/api/drives/main/files", params={"filename": "c.mp3"}, content=b"c").json()["id"]
+        ids = lambda r: sorted(e["id"] for e in r.json()["entries"])
+        self.assertEqual(ids(c.get("/api/drives/main/tree", params={"parent": top})), sorted([a, b]))
+        self.assertEqual(ids(c.get("/api/drives/main/tree")), sorted([a, b, out]))
+        self.assertEqual(c.get("/api/drives/main/tree", params={"parent": a}).status_code, 400)
+
     def test_search(self):
         c = self.c
         folder = c.post("/api/drives/main/folders", json={"name": "Trips"}).json()["id"]

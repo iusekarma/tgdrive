@@ -286,7 +286,8 @@ ones, videos, comics, PDFs and audio are drawn from the server's copy, a video r
 frame (`preload="metadata"`), a comic or PDF only its index and first page (which the server fetches together:
 `api.fileUrlAhead`), audio only its tags, whose song details (title, artist, album...) are
 saved at the same time. **Read details of N songs** does the same for a folder's songs that
-have none saved (`readSongDetails()`), found with one `POST /files/info`. Audio found to have no cover art is
+have none saved (`readSongDetails()`), found with one `POST /files/info`. The folder's **⋯** menu does either for everything
+under it, subfolders included, from `GET /tree`. Audio found to have no cover art is
 remembered for as long as the tab is open (`hasNoCover()`) and not looked at again. An `AbortController` stops it when the folder,
 drive or search changes; closing the tab stops it anyway. Files whose
 thumbnail is cached on the server count as having one, and the server sends

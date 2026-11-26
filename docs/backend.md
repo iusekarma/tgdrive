@@ -285,6 +285,7 @@ on failure.
 | Method | Does |
 |---|---|
 | `info(drive, id)` | The file's details (`width`, `height`, `duration`, `modified`, `taken`, `camera`, and a song's `title`, `artist`, `album`, `album_artist`, `track`, `disc`, `year`, `genre`; any may be missing), decrypted from `nodes.info_enc` |
+| `files_under(drive, parent)` | Every file in the folder (or the drive) and its subfolders, no folders (`GET /tree`) |
 | `infos(drive, ids)` | `info()` for many files, `{id: details}`, leaving out folders, unfinished uploads and unknown ids (`POST /files/info`) |
 | `set_info(drive, id, fields)` | Merges `fields` in, seals the JSON with the file key (AAD `tgdrive/info\|<id>`) and saves it |
 
